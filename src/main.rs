@@ -1,23 +1,58 @@
 use std::fs;
 
+struct Cpu {}
+
+impl Cpu {
+    fn new() -> Self {
+        Cpu {}
+    }
+
+    fn step(&mut self, bus: &mut Bus) -> u8 {
+        let _first_byte = bus.read_byte(0x0100);
+        0
+    }
+}
+
+struct Bus {
+    rom: Vec<u8>,
+}
+
+impl Bus {
+    fn new(rom: Vec<u8>) -> Self {
+        Bus { rom }
+    }
+
+    fn read_byte(&self, addr: u16) -> u8 {
+        self.rom[addr as usize]
+    }
+}
+
+struct GameBoy {
+    cpu: Cpu,
+    bus: Bus,
+}
+
+impl GameBoy {
+    fn new(rom: Vec<u8>) -> Self {
+        GameBoy {
+            cpu: Cpu::new(),
+            bus: Bus::new(rom),
+        }
+    }
+
+    fn step(&mut self) {
+        let _cycles = self.cpu.step(&mut self.bus);
+    }
+}
+
 fn main() -> Result<(), std::io::Error> {
     let path = "roms/Legend of Zelda, The - Link's Awakening (USA, Europe).gb";
     let rom = fs::read(path)?;
 
-    let cart_type = rom[0x147];
-    let mbc_name = match cart_type {
-        0x00 => "ROM ONLY",
-        0x01 => "MBC1",
-        0x03 => "MBC1+RAM+BATTERY",
-        0x13 => "MBC3+RAM+BATTERY",
-        _ => "UNKNOWN",
-    };
+    let mut gameboy = GameBoy::new(rom);
+    gameboy.step();
 
-    let title = &rom[0x134..=0x143];
-    let title = String::from_utf8_lossy(title);
-    let title = title.trim_end_matches('\0');
-
-    println!("title: {title}, cartridge type: {cart_type:#04x} -> {mbc_name}");
+    println!("one step ran");
 
     Ok(())
 }
