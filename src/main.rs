@@ -1,15 +1,130 @@
 use std::fs;
 
-struct Cpu {}
+const ZERO_FLAG: u8 = 0x80;
+const SUBTRACT_FLAG: u8 = 0x40;
+const HALF_CARRY_FLAG: u8 = 0x20;
+const CARRY_FLAG: u8 = 0x10;
+
+struct Cpu {
+    a: u8,
+    f: u8,
+    b: u8,
+    c: u8,
+    d: u8,
+    e: u8,
+    h: u8,
+    l: u8,
+    sp: u16,
+    pc: u16,
+    ime: bool,
+    halted: bool,
+}
 
 impl Cpu {
     fn new() -> Self {
-        Cpu {}
+        Cpu {
+            a: 0x01,
+            f: 0xB0,
+            b: 0x00,
+            c: 0x13,
+            d: 0x00,
+            e: 0xD8,
+            h: 0x01,
+            l: 0x4D,
+            sp: 0xFFFE,
+            pc: 0x0100,
+            ime: false,
+            halted: false,
+        }
+    }
+
+    fn get_zero_flag(&self) -> bool {
+        (self.f & ZERO_FLAG) != 0
+    }
+
+    fn set_zero_flag(&mut self, on: bool) {
+        if on {
+            self.f |= ZERO_FLAG;
+        } else {
+            self.f &= !ZERO_FLAG;
+        }
+    }
+
+    fn get_subtract_flag(&self) -> bool {
+        (self.f & SUBTRACT_FLAG) != 0
+    }
+
+    fn set_subtract_flag(&mut self, on: bool) {
+        if on {
+            self.f |= SUBTRACT_FLAG;
+        } else {
+            self.f &= !SUBTRACT_FLAG;
+        }
+    }
+
+    fn get_half_carry_flag(&self) -> bool {
+        (self.f & HALF_CARRY_FLAG) != 0
+    }
+
+    fn set_half_carry_flag(&mut self, on: bool) {
+        if on {
+            self.f |= HALF_CARRY_FLAG;
+        } else {
+            self.f &= !HALF_CARRY_FLAG;
+        }
+    }
+
+    fn get_carry_flag(&self) -> bool {
+        (self.f & CARRY_FLAG) != 0
+    }
+
+    fn set_carry_flag(&mut self, on: bool) {
+        if on {
+            self.f |= CARRY_FLAG;
+        } else {
+            self.f &= !CARRY_FLAG;
+        }
     }
 
     fn step(&mut self, bus: &mut Bus) -> u8 {
         let _first_byte = bus.read_byte(0x0100);
         0
+    }
+
+    fn get_af(&self) -> u16 {
+        (self.a as u16) << 8 | self.f as u16
+    }
+
+    fn set_af(&mut self, value: u16) {
+        self.a = (value >> 8) as u8;
+        self.f = (value as u8) & 0xF0;
+    }
+
+    fn get_bc(&self) -> u16 {
+        (self.b as u16) << 8 | self.c as u16
+    }
+
+    fn set_bc(&mut self, value: u16) {
+        self.b = (value >> 8) as u8;
+        self.c = value as u8;
+    }
+
+    fn get_de(&self) -> u16 {
+        (self.d as u16) << 8 | self.e as u16
+    }
+
+    fn set_de(&mut self, value: u16) {
+        self.d = (value >> 8) as u8;
+        self.e = value as u8;
+    }
+
+    fn get_hl(&self) -> u16 {
+        (self.h as u16) << 8 | self.l as u16
+    }
+
+    fn set_hl(&mut self, value: u16) {
+        self.h = (value >> 8) as u8;
+        self.l = value as u8;
     }
 }
 
@@ -103,36 +218,23 @@ fn main() -> Result<(), std::io::Error> {
     let rom = fs::read(path)?;
 
     let mut gameboy = GameBoy::new(rom);
-    let bus = &mut gameboy.bus;
+    let cpu = &mut gameboy.cpu;
 
-    bus.write_byte(0xC000, 0x42);
-    bus.write_byte(0x8000, 0x37);
-    bus.write_byte(0xFF80, 0x99);
-    println!("WRAM 0xC000 = {:#04x} (expect 0x42)", bus.read_byte(0xC000));
-    println!("VRAM 0x8000 = {:#04x} (expect 0x37)", bus.read_byte(0x8000));
-    println!("HRAM 0xFF80 = {:#04x} (expect 0x99)", bus.read_byte(0xFF80));
+    println!("pc = {:#06x} (expect 0x0100)", cpu.pc);
+    println!("af = {:#06x} (expect 0x01b0)", cpu.get_af());
+    println!("bc = {:#06x} (expect 0x0013)", cpu.get_bc());
+    println!("de = {:#06x} (expect 0x00d8)", cpu.get_de());
+    println!("hl = {:#06x} (expect 0x014d)", cpu.get_hl());
 
-    println!("ROM  0x0147 = {:#04x} (expect 0x03)", bus.read_byte(0x0147));
+    cpu.set_bc(0x1122);
+    cpu.set_de(0x3344);
+    cpu.set_hl(0x5566);
+    println!("bc = {:#06x} (expect 0x1122)", cpu.get_bc());
+    println!("de = {:#06x} (expect 0x3344)", cpu.get_de());
+    println!("hl = {:#06x} (expect 0x5566)", cpu.get_hl());
 
-    bus.write_byte(0x0000, 0xFF);
-    println!(
-        "ROM  0x0000 = {:#04x} (unchanged by the write above)",
-        bus.read_byte(0x0000)
-    );
-
-    bus.write_word(0xC010, 0xBEEF);
-    println!(
-        "word 0xC010 = {:#06x} (expect 0xbeef)",
-        bus.read_word(0xC010)
-    );
-    println!(
-        "  byte 0xC010 = {:#04x} (low, expect 0xef)",
-        bus.read_byte(0xC010)
-    );
-    println!(
-        "  byte 0xC011 = {:#04x} (high, expect 0xbe)",
-        bus.read_byte(0xC011)
-    );
+    cpu.set_af(0xFFFF);
+    println!("af = {:#06x} (expect 0xfff0)", cpu.get_af());
 
     Ok(())
 }
