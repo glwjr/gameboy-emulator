@@ -1,5 +1,7 @@
 use std::fs;
 
+const TRACE: bool = true;
+
 const ZERO_FLAG: u8 = 0x80;
 const SUBTRACT_FLAG: u8 = 0x40;
 const HALF_CARRY_FLAG: u8 = 0x20;
@@ -86,9 +88,63 @@ impl Cpu {
         }
     }
 
+    fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
+        let byte = bus.read_byte(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        byte
+    }
+
+    fn fetch_word(&mut self, bus: &mut Bus) -> u16 {
+        let low = self.fetch_byte(bus) as u16;
+        let high = self.fetch_byte(bus) as u16;
+        low | (high << 8)
+    }
+
+    fn push_word(&mut self, bus: &mut Bus, value: u16) {
+        self.sp = self.sp.wrapping_sub(2);
+        bus.write_word(self.sp, value);
+    }
+
     fn step(&mut self, bus: &mut Bus) -> u8 {
-        let _first_byte = bus.read_byte(0x0100);
-        0
+        let pc = self.pc;
+        if TRACE {
+            println!(
+                "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
+                self.a,
+                self.f,
+                self.b,
+                self.c,
+                self.d,
+                self.e,
+                self.h,
+                self.l,
+                self.sp,
+                self.pc,
+                bus.read_byte(self.pc),
+                bus.read_byte(self.pc.wrapping_add(1)),
+                bus.read_byte(self.pc.wrapping_add(2)),
+                bus.read_byte(self.pc.wrapping_add(3)),
+            )
+        }
+        let opcode = self.fetch_byte(bus);
+
+        match opcode {
+            0x00 => 4, // NOP
+            0xC3 => {
+                // JP nn
+                let addr = self.fetch_word(bus);
+                self.pc = addr;
+                16
+            }
+            0xCD => {
+                // CALL nn
+                let target = self.fetch_word(bus);
+                self.push_word(bus, self.pc);
+                self.pc = target;
+                24
+            }
+            _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
+        }
     }
 
     fn get_af(&self) -> u16 {
@@ -218,23 +274,12 @@ fn main() -> Result<(), std::io::Error> {
     let rom = fs::read(path)?;
 
     let mut gameboy = GameBoy::new(rom);
-    let cpu = &mut gameboy.cpu;
 
-    println!("pc = {:#06x} (expect 0x0100)", cpu.pc);
-    println!("af = {:#06x} (expect 0x01b0)", cpu.get_af());
-    println!("bc = {:#06x} (expect 0x0013)", cpu.get_bc());
-    println!("de = {:#06x} (expect 0x00d8)", cpu.get_de());
-    println!("hl = {:#06x} (expect 0x014d)", cpu.get_hl());
+    for _ in 0..10 {
+        gameboy.step();
+    }
 
-    cpu.set_bc(0x1122);
-    cpu.set_de(0x3344);
-    cpu.set_hl(0x5566);
-    println!("bc = {:#06x} (expect 0x1122)", cpu.get_bc());
-    println!("de = {:#06x} (expect 0x3344)", cpu.get_de());
-    println!("hl = {:#06x} (expect 0x5566)", cpu.get_hl());
-
-    cpu.set_af(0xFFFF);
-    println!("af = {:#06x} (expect 0xfff0)", cpu.get_af());
+    println!("ran 10 steps");
 
     Ok(())
 }
