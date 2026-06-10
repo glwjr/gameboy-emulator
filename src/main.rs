@@ -143,6 +143,13 @@ impl Cpu {
                 self.pc = target;
                 24
             }
+            0xF0 => {
+                // LDH A, (n) - load into A from the high page
+                let n = self.fetch_byte(bus);
+                let addr = 0xFF00 | (n as u16);
+                self.a = bus.read_byte(addr);
+                12
+            }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
         }
     }
