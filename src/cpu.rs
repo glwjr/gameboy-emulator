@@ -208,6 +208,11 @@ impl Cpu {
                 self.set_carry_flag(false);
                 8
             }
+            0x31 => {
+                // LD SP, nn - load a 16-bit immediate into the stack pointer
+                self.sp = self.fetch_word(bus);
+                12
+            }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
         }
     }
