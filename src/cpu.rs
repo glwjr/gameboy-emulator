@@ -105,6 +105,12 @@ impl Cpu {
         bus.write_word(self.sp, value);
     }
 
+    fn pop_word(&mut self, bus: &mut Bus) -> u16 {
+        let value = bus.read_word(self.sp);
+        self.sp = self.sp.wrapping_add(2);
+        value
+    }
+
     pub fn print_trace(&self, bus: &Bus) {
         println!(
             "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
@@ -147,6 +153,11 @@ impl Cpu {
                 self.push_word(bus, self.pc);
                 self.pc = target;
                 24
+            }
+            0xC9 => {
+                // RET
+                self.pc = self.pop_word(bus);
+                16
             }
             0xF0 => {
                 // LDH A, (n) - load into A from the high page
@@ -301,6 +312,31 @@ mod tests {
         );
         assert_eq!(bus.read_byte(0xFFFC), 0x03, "low byte of return address");
         assert_eq!(bus.read_byte(0xFFFD), 0xC0, "high byte of return address");
+    }
+
+    #[test]
+    fn call_then_ret_round_trips() {
+        // CALL 0xC100, where a RET is planted
+        // Step 1 (CALL): Pushes 0xC003, jumps to 0xC100, sp -> 0xFFFC
+        // Step 2 (RET): Pops 0xC003 back into pc, sp -> 0xFFFE
+        // The invariant: pc lands after the CALL, sp fully unwinds
+        let (mut cpu, mut bus) = setup(&[0xCD, 0x00, 0xC1]); // CALL 0xC100
+        bus.write_byte(0xC100, 0xC9); // plant RET at the call target
+
+        cpu.step(&mut bus); // execute CALL
+        assert_eq!(cpu.pc, 0xC100, "CALL should land on the RET");
+
+        let cycles = cpu.step(&mut bus); // execute RET
+
+        assert_eq!(cycles, 16, "RET should take 16 cycles");
+        assert_eq!(
+            cpu.pc, 0xC003,
+            "RET should return to the instruction after the CALL"
+        );
+        assert_eq!(
+            cpu.sp, 0xFFFE,
+            "stack should fully unwind: push then pop nets zero"
+        );
     }
 
     #[test]
