@@ -168,6 +168,18 @@ impl Cpu {
                 self.set_carry_flag(a < n);
                 8
             }
+            0x20 => {
+                // JR NZ, e
+                // if Z is clear, hop forward or backward by e bytes
+                // otherwise fall through to the next instruction
+                let offset = self.fetch_byte(bus) as i8;
+                if !self.get_zero_flag() {
+                    self.pc = self.pc.wrapping_add(offset as u16); // taken
+                    12
+                } else {
+                    8 // not taken: just fall through
+                }
+            }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
         }
     }
@@ -272,7 +284,8 @@ mod tests {
 
     #[test]
     fn cp_equal_sets_zero_clears_carry() {
-        // A == n: result is zero, no borrow anywhere.
+        // A == n
+        // Result is zero, no borrow anywhere
         let (mut cpu, mut bus) = setup(&[0xFE, 0x42]); // CP 0x42
         cpu.a = 0x42;
 
@@ -288,7 +301,8 @@ mod tests {
 
     #[test]
     fn cp_smaller_a_sets_carry_and_half_carry() {
-        // A < n with a low-nibble borrow: 0x00 - 0x91
+        // A < n with a low-nibble borrow
+        // 0x00 - 0x91
         let (mut cpu, mut bus) = setup(&[0xFE, 0x91]); // CP 0x91
         cpu.a = 0x00;
 
@@ -306,8 +320,8 @@ mod tests {
 
     #[test]
     fn cp_half_carry_without_full_carry() {
-        // The isolating case: A > n overall (no full borrow), but the low
-        // nibble still borrows -- 0x10 - 0x01
+        // A > n overall (no full borrow), but the low
+        // nibble still borrows: 0x10 - 0x01
         let (mut cpu, mut bus) = setup(&[0xFE, 0x01]); // CP 0x01
         cpu.a = 0x10;
 
@@ -323,6 +337,56 @@ mod tests {
         assert!(
             !cpu.get_carry_flag(),
             "0x10 > 0x01 overall, so no full borrow: C clear"
+        );
+    }
+
+    #[test]
+    fn jr_nz_taken_jumps_backward() {
+        // Z clear -> branch taken
+        // Offset 0xFA = -6 (signed)
+        // After fetching the 2-byte instruction, pc = 0xC002
+        // Applying -6:  0xC002 - 6 = 0xBFFC
+        let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
+        assert_eq!(
+            cpu.pc, 0xBFFC,
+            "taken backward jump: 0xC002 + (-6) = 0xBFFC"
+        );
+    }
+
+    #[test]
+    fn jr_nz_taken_jumps_forward() {
+        // Z clear -> taken
+        // Offset 0x05 = +5 (signed)
+        // After fetch pc = 0xC002, applying +5 -> 0xC007
+        let (mut cpu, mut bus) = setup(&[0x20, 0x05]); // JR NZ, +5
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
+        assert_eq!(cpu.pc, 0xC007, "taken forward jump: 0xC002 + 5 = 0xC007");
+    }
+
+    #[test]
+    fn jr_nz_not_taken_falls_through() {
+        // Z set -> branch not taken
+        // The offset byte is still consumed,
+        // so pc must advance past the full 2-byte instruction to 0xC002,
+        // and the offset must not be applied
+        let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6 (ignored)
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "not-taken JR should cost 8 cycles");
+        assert_eq!(
+            cpu.pc, 0xC002,
+            "not taken: pc advances past both bytes, offset not applied"
         );
     }
 }
