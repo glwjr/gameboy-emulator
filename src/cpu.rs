@@ -190,3 +190,53 @@ impl Cpu {
         self.l = value as u8;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup(program: &[u8]) -> (Cpu, Bus) {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(vec![0; 0x8000]);
+        cpu.pc = 0xC000;
+        for (i, &byte) in program.iter().enumerate() {
+            bus.write_byte(0xC000 + i as u16, byte);
+        }
+        (cpu, bus)
+    }
+
+    #[test]
+    fn nop_advances_pc_and_touches_nothing_else() {
+        let (mut cpu, mut bus) = setup(&[0x00]); // NOP
+
+        let af_before = cpu.get_af();
+        let bc_before = cpu.get_bc();
+        let sp_before = cpu.sp;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "NOP should take 4 cycles");
+        assert_eq!(cpu.pc, 0xC001, "NOP should advance pc by exactly 1");
+        assert_eq!(cpu.get_af(), af_before, "NOP must not touch A or flags");
+        assert_eq!(cpu.get_bc(), bc_before, "NOP must not touch BC");
+        assert_eq!(cpu.sp, sp_before, "NOP must not touch sp");
+    }
+
+    #[test]
+    fn call_pushes_return_address_and_jumps() {
+        let (mut cpu, mut bus) = setup(&[0xCD, 0x34, 0x12]);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x1234, "CALL should jump to the operand address");
+        assert_eq!(cycles, 24, "CALL nn should take 24 cycles");
+        assert_eq!(cpu.sp, 0xFFFC, "CALL should push 2 bytes (sp -= 2)");
+        assert_eq!(
+            bus.read_word(cpu.sp),
+            0xC003,
+            "CALL should push the address of the next instruction"
+        );
+        assert_eq!(bus.read_byte(0xFFFC), 0x03, "low byte of return address");
+        assert_eq!(bus.read_byte(0xFFFD), 0xC0, "high byte of return address");
+    }
+}
