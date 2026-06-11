@@ -213,6 +213,12 @@ impl Cpu {
                 self.sp = self.fetch_word(bus);
                 12
             }
+            0x21 => {
+                // LD HL, nn - load a 16-bit immediate into HL
+                let nn = self.fetch_word(bus);
+                self.set_hl(nn);
+                12
+            }
             0xAF => {
                 // XOR A
                 // XOR the A register with itself
