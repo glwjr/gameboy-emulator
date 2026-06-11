@@ -20,7 +20,8 @@ impl GameBoy {
     }
 
     fn step(&mut self) {
-        let _cycles = self.cpu.step(&mut self.bus);
+        let cycles = self.cpu.step(&mut self.bus);
+        self.bus.tick(cycles);
     }
 }
 
@@ -30,11 +31,9 @@ fn main() -> Result<(), std::io::Error> {
 
     let mut gameboy = GameBoy::new(rom);
 
-    for _ in 0..10 {
+    for _ in 0..100000 {
         gameboy.step();
     }
-
-    println!("ran 10 steps");
 
     Ok(())
 }

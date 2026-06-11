@@ -7,6 +7,7 @@ pub struct Bus {
     io: [u8; 0x80],
     hram: [u8; 0x7F],
     ie: u8,
+    scanline_cycles: u32,
 }
 
 impl Bus {
@@ -20,6 +21,7 @@ impl Bus {
             io: [0; 0x80],
             hram: [0; 0x7F],
             ie: 0,
+            scanline_cycles: 0,
         }
     }
 
@@ -62,5 +64,19 @@ impl Bus {
     pub fn write_word(&mut self, addr: u16, value: u16) {
         self.write_byte(addr, value as u8);
         self.write_byte(addr.wrapping_add(1), (value >> 8) as u8);
+    }
+
+    pub fn tick(&mut self, cycles: u8) {
+        // Accumulate: Add the incoming cycles to the field
+        self.scanline_cycles += cycles as u32;
+
+        // Check if a scanline's worth has elapsed and carry the remainder
+        if self.scanline_cycles >= 456 {
+            self.scanline_cycles -= 456;
+
+            // Advance LY with the wrap
+            let ly = self.io[0x44];
+            self.io[0x44] = if ly >= 153 { 0 } else { ly + 1 }
+        }
     }
 }

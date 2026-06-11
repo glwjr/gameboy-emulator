@@ -1,6 +1,6 @@
 use crate::bus::Bus;
 
-const TRACE: bool = true;
+const TRACE: bool = false;
 
 const ZERO_FLAG: u8 = 0x80;
 const SUBTRACT_FLAG: u8 = 0x40;
