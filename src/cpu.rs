@@ -213,6 +213,16 @@ impl Cpu {
                 self.sp = self.fetch_word(bus);
                 12
             }
+            0xAF => {
+                // XOR A
+                // XOR the A register with itself
+                self.a ^= self.a;
+                self.set_zero_flag(self.a == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(false);
+                4
+            }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
         }
     }
@@ -483,5 +493,26 @@ mod tests {
         assert!(!cpu.get_subtract_flag());
         assert!(cpu.get_half_carry_flag());
         assert!(!cpu.get_carry_flag());
+    }
+
+    #[test]
+    fn xor_a_zeroes_a_and_clears_nhc() {
+        // XOR A always produces 0. Start A nonzero so the test
+        // proves the XOR did the zeroing
+        let (mut cpu, mut bus) = setup(&[0xAF]); // XOR A
+        cpu.a = 0x5A;
+        cpu.set_half_carry_flag(true); // pre-set H: proves XOR clears it (AND sets it)
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "XOR A should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "A ^ A is always 0");
+        assert!(cpu.get_zero_flag(), "zero result should set Z");
+        assert!(!cpu.get_subtract_flag(), "XOR always clears N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "XOR always clears H — opposite of AND"
+        );
+        assert!(!cpu.get_carry_flag(), "XOR always clears C");
     }
 }
