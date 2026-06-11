@@ -23,6 +23,14 @@ impl GameBoy {
         let cycles = self.cpu.step(&mut self.bus);
         self.bus.tick(cycles);
     }
+
+    fn pc(&self) -> u16 {
+        self.cpu.pc()
+    }
+
+    fn print_trace(&self) {
+        self.cpu.print_trace(&self.bus);
+    }
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -34,6 +42,8 @@ fn main() -> Result<(), std::io::Error> {
     for _ in 0..100000 {
         gameboy.step();
     }
+
+    gameboy.print_trace();
 
     Ok(())
 }

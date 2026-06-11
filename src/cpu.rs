@@ -105,28 +105,33 @@ impl Cpu {
         bus.write_word(self.sp, value);
     }
 
+    pub fn print_trace(&self, bus: &Bus) {
+        println!(
+            "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
+            self.a,
+            self.f,
+            self.b,
+            self.c,
+            self.d,
+            self.e,
+            self.h,
+            self.l,
+            self.sp,
+            self.pc,
+            bus.read_byte(self.pc),
+            bus.read_byte(self.pc.wrapping_add(1)),
+            bus.read_byte(self.pc.wrapping_add(2)),
+            bus.read_byte(self.pc.wrapping_add(3)),
+        )
+    }
+
     pub fn step(&mut self, bus: &mut Bus) -> u8 {
         let pc = self.pc;
-        if TRACE {
-            println!(
-                "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
-                self.a,
-                self.f,
-                self.b,
-                self.c,
-                self.d,
-                self.e,
-                self.h,
-                self.l,
-                self.sp,
-                self.pc,
-                bus.read_byte(self.pc),
-                bus.read_byte(self.pc.wrapping_add(1)),
-                bus.read_byte(self.pc.wrapping_add(2)),
-                bus.read_byte(self.pc.wrapping_add(3)),
-            )
-        }
         let opcode = self.fetch_byte(bus);
+
+        if TRACE {
+            self.print_trace(bus);
+        }
 
         match opcode {
             0x00 => 4, // NOP
@@ -180,6 +185,18 @@ impl Cpu {
                     8 // not taken: just fall through
                 }
             }
+            0xE6 => {
+                // AND n
+                // Fetches one immediate byte and bitwise-ANDs it into A
+                // A = A & n
+                let n = self.fetch_byte(bus);
+                self.a &= n;
+                self.set_zero_flag(self.a == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(true);
+                self.set_carry_flag(false);
+                8
+            }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
         }
     }
@@ -230,6 +247,10 @@ impl Cpu {
     fn set_hl(&mut self, value: u16) {
         self.h = (value >> 8) as u8;
         self.l = value as u8;
+    }
+
+    pub fn pc(&self) -> u16 {
+        self.pc
     }
 }
 
@@ -388,5 +409,38 @@ mod tests {
             cpu.pc, 0xC002,
             "not taken: pc advances past both bytes, offset not applied"
         );
+    }
+
+    #[test]
+    fn test_and_n_nonzero_result() {
+        // AND 0x3C with A=0xF0 -> 0x30
+        let (mut cpu, mut bus) = setup(&[0xE6, 0x3C]);
+        cpu.a = 0xF0;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x30);
+        assert_eq!(cycles, 8);
+        assert!(!cpu.get_zero_flag());
+        assert!(!cpu.get_subtract_flag());
+        assert!(cpu.get_half_carry_flag());
+        assert!(!cpu.get_carry_flag());
+    }
+
+    #[test]
+    fn test_and_n_zero_result() {
+        // AND 0x0F with A=0xF0 -> 0x00
+        let (mut cpu, mut bus) = setup(&[0xE6, 0x0F]);
+        cpu.a = 0xF0;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x00);
+        assert_eq!(cycles, 8);
+        assert!(cpu.get_zero_flag());
+        assert!(!cpu.get_subtract_flag());
+        assert!(cpu.get_half_carry_flag());
+        assert!(!cpu.get_carry_flag());
     }
 }
