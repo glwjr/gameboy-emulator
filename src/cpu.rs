@@ -150,7 +150,37 @@ impl Cpu {
                 self.a = bus.read_byte(addr);
                 12
             }
+            0xE0 => {
+                // LDH (n), A - store from A to the high page
+                let n = self.fetch_byte(bus);
+                let addr = 0xFF00 | (n as u16);
+                bus.write_byte(addr, self.a);
+                12
+            }
+            0xCB => self.step_cb(bus), // hand off to the CB table
+            0xFE => {
+                // CP n
+                let n = self.fetch_byte(bus);
+                let a = self.a;
+                self.set_zero_flag(a == n);
+                self.set_subtract_flag(true);
+                self.set_half_carry_flag((a & 0x0F) < (n & 0x0F));
+                self.set_carry_flag(a < n);
+                8
+            }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
+        }
+    }
+
+    fn step_cb(&mut self, bus: &mut Bus) -> u8 {
+        let cb_opcode = self.fetch_byte(bus);
+        match cb_opcode {
+            0x87 => {
+                // RES 0, A
+                self.a &= !0x01;
+                8
+            }
+            _ => panic!("unimplemented CB opcode {:#04x}", cb_opcode),
         }
     }
 
@@ -238,5 +268,61 @@ mod tests {
         );
         assert_eq!(bus.read_byte(0xFFFC), 0x03, "low byte of return address");
         assert_eq!(bus.read_byte(0xFFFD), 0xC0, "high byte of return address");
+    }
+
+    #[test]
+    fn cp_equal_sets_zero_clears_carry() {
+        // A == n: result is zero, no borrow anywhere.
+        let (mut cpu, mut bus) = setup(&[0xFE, 0x42]); // CP 0x42
+        cpu.a = 0x42;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "CP n should take 8 cycles");
+        assert_eq!(cpu.a, 0x42, "CP must not modify A");
+        assert!(cpu.get_zero_flag(), "A == n should set Z");
+        assert!(cpu.get_subtract_flag(), "CP always sets N");
+        assert!(!cpu.get_half_carry_flag(), "equal values: no half-borrow");
+        assert!(!cpu.get_carry_flag(), "equal values: no full borrow");
+    }
+
+    #[test]
+    fn cp_smaller_a_sets_carry_and_half_carry() {
+        // A < n with a low-nibble borrow: 0x00 - 0x91
+        let (mut cpu, mut bus) = setup(&[0xFE, 0x91]); // CP 0x91
+        cpu.a = 0x00;
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x00, "CP must not modify A");
+        assert!(!cpu.get_zero_flag(), "0x00 != 0x91 should clear Z");
+        assert!(cpu.get_subtract_flag(), "CP always sets N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "low nibble 0x0 < 0x1 should set H"
+        );
+        assert!(cpu.get_carry_flag(), "0x00 < 0x91 should set C");
+    }
+
+    #[test]
+    fn cp_half_carry_without_full_carry() {
+        // The isolating case: A > n overall (no full borrow), but the low
+        // nibble still borrows -- 0x10 - 0x01
+        let (mut cpu, mut bus) = setup(&[0xFE, 0x01]); // CP 0x01
+        cpu.a = 0x10;
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x10, "CP must not modify A");
+        assert!(!cpu.get_zero_flag(), "0x10 != 0x01 should clear Z");
+        assert!(cpu.get_subtract_flag(), "CP always sets N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "low nibble 0x0 < 0x1 sets H even though A > n"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "0x10 > 0x01 overall, so no full borrow: C clear"
+        );
     }
 }
