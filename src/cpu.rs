@@ -345,6 +345,36 @@ impl Cpu {
         value
     }
 
+    fn read_r8(&mut self, bus: &mut Bus, index: u8) -> u8 {
+        // index order: B C D E H L (HL) A -- fixed by the opcode encoding
+        match index {
+            0 => self.b,
+            1 => self.c,
+            2 => self.d,
+            3 => self.e,
+            4 => self.h,
+            5 => self.l,
+            6 => bus.read_byte(self.get_hl()),
+            7 => self.a,
+            _ => panic!("invalid r8 index: {}", index),
+        }
+    }
+
+    fn write_r8(&mut self, bus: &mut Bus, index: u8, value: u8) {
+        // index order: B C D E H L (HL) A -- fixed by the opcode encoding
+        match index {
+            0 => self.b = value,
+            1 => self.c = value,
+            2 => self.d = value,
+            3 => self.e = value,
+            4 => self.h = value,
+            5 => self.l = value,
+            6 => bus.write_byte(self.get_hl(), value),
+            7 => self.a = value,
+            _ => panic!("invalid r8 index: {}", index),
+        }
+    }
+
     // Flag accessors (F register, high nibble only)
 
     fn get_zero_flag(&self) -> bool {
@@ -446,6 +476,42 @@ mod tests {
             bus.write_byte(0xC000 + i as u16, byte);
         }
         (cpu, bus)
+    }
+
+    // read_r8 / write_r8 decoders
+
+    #[test]
+    fn r8_decoders_map_indices_to_registers_and_memory() {
+        // Index order: B C D E H L (HL) A -- the directory both helpers share
+        // Distinct sentinels per register so a transposed entry can't pass
+        let (mut cpu, mut bus) = setup(&[]); // no program -- calling helpers directly
+
+        // -- read_r8: spot-check ends and middle of the directory
+        cpu.b = 0x11;
+        cpu.e = 0x33;
+        cpu.a = 0x77;
+        assert_eq!(cpu.read_r8(&mut bus, 0), 0x11, "index 0 is B");
+        assert_eq!(cpu.read_r8(&mut bus, 3), 0x33, "index 3 is E");
+        assert_eq!(cpu.read_r8(&mut bus, 7), 0x77, "index 7 is A");
+
+        // -- write_r8 -> read_r8 round trip through a plain register
+        cpu.write_r8(&mut bus, 4, 0x44);
+        assert_eq!(cpu.h, 0x44, "index 4 writes land in H");
+        assert_eq!(cpu.read_r8(&mut bus, 4), 0x44, "index 4 round-trips");
+
+        // -- index 6: (HL) must go through MEMORY, not any register
+        cpu.set_hl(0xC050);
+        cpu.write_r8(&mut bus, 6, 0x99);
+        assert_eq!(
+            bus.read_byte(0xC050),
+            0x99,
+            "index 6 write must land in memory at HL"
+        );
+        assert_eq!(
+            cpu.read_r8(&mut bus, 6),
+            0x99,
+            "index 6 read must come from memory at HL"
+        );
     }
 
     // 0x00 NOP
@@ -601,7 +667,7 @@ mod tests {
             !cpu.get_zero_flag(),
             "result is zero but Z must NOT set -- ADD HL, rr never computes Z"
         );
-        assert!(cpu.get_subtract_flag() == false, "ADD HL, rr clears N");
+        assert!(!cpu.get_subtract_flag(), "ADD HL, rr clears N");
         assert!(
             cpu.get_half_carry_flag(),
             "0xFFF + 1 overflows twelve bits: H sets"
