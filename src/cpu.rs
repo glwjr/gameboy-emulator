@@ -99,6 +99,11 @@ impl Cpu {
                 self.sp = self.fetch_word(bus);
                 12
             }
+            0x3E => {
+                // LD A, n - load an immediate byte into A
+                self.a = self.fetch_byte(bus);
+                8
+            }
             0x78 => {
                 // LD A, B
                 self.a = self.b;
