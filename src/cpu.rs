@@ -99,6 +99,11 @@ impl Cpu {
                 self.sp = self.fetch_word(bus);
                 12
             }
+            0x78 => {
+                // LD A, B
+                self.a = self.b;
+                4
+            }
             0xAF => {
                 // XOR A
                 // XOR the A register with itself
