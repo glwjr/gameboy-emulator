@@ -1,3 +1,5 @@
+use core::panic;
+
 use crate::bus::Bus;
 
 const TRACE: bool = false;
@@ -180,20 +182,14 @@ impl Cpu {
                 self.a = self.fetch_byte(bus);
                 8
             }
-            0x57 => {
-                // LD D, A
-                self.d = self.a;
-                4
-            }
-            0x78 => {
-                // LD A, B
-                self.a = self.b;
-                4
-            }
-            0x7A => {
-                // LD A, D
-                self.a = self.d;
-                4
+            0x76 => panic!("HALT not yet implemented"),
+            0x40..=0x7F => {
+                let dst = (opcode >> 3) & 0x07;
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.write_r8(bus, dst, value);
+
+                if dst == 6 || src == 6 { 8 } else { 4 }
             }
             0xAF => {
                 // XOR A
@@ -750,6 +746,20 @@ mod tests {
         );
         assert_eq!(cpu.h, 0xC1, "carry must propagate into h");
         assert_eq!(cpu.l, 0x00, "l wraps to zero");
+    }
+
+    // 0x46 LD B, (HL)
+
+    #[test]
+    fn ld_b_from_hl_reads_memory() {
+        let (mut cpu, mut bus) = setup(&[0x46]); // LD B, (HL)
+        cpu.set_hl(0xC050);
+        bus.write_byte(0xC050, 0x42);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "LD B, (HL) should take 8 cycles");
+        assert_eq!(cpu.b, 0x42, "the byte at (HL) lands in B");
     }
 
     // 0xAF XOR A
