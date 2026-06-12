@@ -62,11 +62,41 @@ impl Cpu {
                 self.set_bc(nn);
                 12
             }
+            0x05 => {
+                // DEC B
+                let old = self.b;
+                self.b = old.wrapping_sub(1);
+                self.set_zero_flag(self.b == 0);
+                self.set_subtract_flag(true);
+                self.set_half_carry_flag((old & 0x0F) == 0x00);
+                // Carry is preserved -- DEC never touches it
+                4
+            }
+            0x06 => {
+                // LD B, n
+                self.b = self.fetch_byte(bus);
+                8
+            }
             0x0B => {
                 // DEC BC
                 // Decrement the BC register pair -- no flags
                 let bc = self.get_bc();
                 self.set_bc(bc.wrapping_sub(1));
+                8
+            }
+            0x0C => {
+                // INC C
+                let old = self.c;
+                self.c = old.wrapping_add(1);
+                self.set_zero_flag(self.c == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag((old & 0x0F) == 0x0F);
+                // Carry is preserved -- INC never touches it
+                4
+            }
+            0x0E => {
+                // LD C, n - load an immediate byte into C
+                self.c = self.fetch_byte(bus);
                 8
             }
             0x20 => {
@@ -94,6 +124,13 @@ impl Cpu {
                 self.set_hl(addr.wrapping_add(1));
                 8
             }
+            0x2A => {
+                // LD A, (HL+) - read from memory at HL into A, then increment HL
+                let addr = self.get_hl();
+                self.a = bus.read_byte(addr);
+                self.set_hl(addr.wrapping_add(1));
+                8
+            }
             0x31 => {
                 // LD SP, nn - load a 16-bit immediate into the stack pointer
                 self.sp = self.fetch_word(bus);
@@ -104,9 +141,19 @@ impl Cpu {
                 self.a = self.fetch_byte(bus);
                 8
             }
+            0x57 => {
+                // LD D, A
+                self.d = self.a;
+                4
+            }
             0x78 => {
                 // LD A, B
                 self.a = self.b;
+                4
+            }
+            0x7A => {
+                // LD A, D
+                self.a = self.d;
                 4
             }
             0xAF => {
@@ -154,10 +201,14 @@ impl Cpu {
                 bus.write_byte(addr, self.a);
                 12
             }
+            0xE2 => {
+                // LD (C), A - store A at 0xFF00 plus C
+                let addr = 0xFF00 | (self.c as u16);
+                bus.write_byte(addr, self.a);
+                8
+            }
             0xE6 => {
                 // AND n
-                // Fetches one immediate byte and bitwise-ANDs it into A
-                // A = A & n
                 let n = self.fetch_byte(bus);
                 self.a &= n;
                 self.set_zero_flag(self.a == 0);
@@ -165,6 +216,13 @@ impl Cpu {
                 self.set_half_carry_flag(true);
                 self.set_carry_flag(false);
                 8
+            }
+            0xEA => {
+                // LD (nn), A
+                // Store A into memory at a 16-bit immediate address
+                let addr = self.fetch_word(bus);
+                bus.write_byte(addr, self.a);
+                16
             }
             0xF0 => {
                 // LDH A, (n) - load into A from the high page
@@ -370,6 +428,89 @@ mod tests {
         assert_eq!(cpu.sp, sp_before, "NOP must not touch sp");
     }
 
+    // 0x05 DEC B
+
+    #[test]
+    fn dec_b_sets_hn_clears_z_and_preserves_carry() {
+        let (mut cpu, mut bus) = setup(&[0x05]); // DEC B
+        cpu.b = 0x10;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "DEC B should take 4 cycles");
+        assert_eq!(cpu.b, 0x0F, "decrementing 0x10 gives 0x0F -- nonzero");
+        assert!(!cpu.get_zero_flag(), "nonzero result: Z clear");
+        assert!(cpu.get_subtract_flag(), "DEC always sets N");
+        assert!(cpu.get_half_carry_flag(), "low nibble 0x0 borrow: H sets");
+        assert!(
+            cpu.get_carry_flag(),
+            "DEC must preserve carry -- not clear it"
+        );
+    }
+
+    #[test]
+    fn dec_b_sets_z_clears_h_and_preserves_carry() {
+        let (mut cpu, mut bus) = setup(&[0x05]); // DEC B
+        cpu.b = 0x01;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "DEC B should take 4 cycles");
+        assert_eq!(cpu.b, 0x00, "decrementing 0x01 gives 0x00");
+        assert!(cpu.get_zero_flag(), "result is zero: Z is set");
+        assert!(cpu.get_subtract_flag(), "DEC always sets N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "low nibble 0x01 absorbs the decrement: no borrow, H clear"
+        );
+        assert!(
+            cpu.get_carry_flag(),
+            "DEC must preserve carry -- not clear it"
+        );
+    }
+
+    // 0x0C INC C
+
+    #[test]
+    fn inc_c_half_carry_and_preserves_carry() {
+        let (mut cpu, mut bus) = setup(&[0x0C]); // INC C
+        cpu.c = 0x0F;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "INC C should take 4 cycles");
+        assert_eq!(cpu.c, 0x10, "incrementing 0x0F gives 0x10 -- nonzero");
+        assert!(!cpu.get_zero_flag(), "nonzero result: Z clear");
+        assert!(!cpu.get_subtract_flag(), "INC always clears N");
+        assert!(cpu.get_half_carry_flag(), "low nibble 0xF overflow: H sets");
+        assert!(
+            cpu.get_carry_flag(),
+            "INC must preserve carry -- not clear it"
+        );
+    }
+
+    #[test]
+    fn inc_c_wraps_to_zero_and_sets_z() {
+        let (mut cpu, mut bus) = setup(&[0x0C]); // INC C
+        cpu.c = 0xFF;
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "INC C should take 4 cycles");
+        assert_eq!(cpu.c, 0x00, "0xFF + 1 wraps to 0x00");
+        assert!(cpu.get_zero_flag(), "zero result: Z set");
+        assert!(!cpu.get_subtract_flag(), "INC always clears N");
+        assert!(cpu.get_half_carry_flag(), "low nibble was 0xF: H sets");
+        assert!(
+            !cpu.get_carry_flag(),
+            "INC must preserve carry -- false stays false"
+        );
+    }
+
     // 0x20 JR NZ, e
 
     #[test]
@@ -484,7 +625,7 @@ mod tests {
     // 0xB1 OR C
 
     #[test]
-    fn or_c_sets_z_and_clears_nhc() {
+    fn or_c_nonzero_result_clears_z_and_nhc() {
         let (mut cpu, mut bus) = setup(&[0xB1]);
         cpu.a = 0x59;
         cpu.c = 0x5A;

@@ -39,7 +39,7 @@ fn main() -> Result<(), std::io::Error> {
 
     let mut gameboy = GameBoy::new(rom);
 
-    for _ in 0..100000 {
+    for _ in 0..10000000 {
         gameboy.step();
     }
 
