@@ -114,6 +114,15 @@ impl Cpu {
                 self.set_carry_flag(false);
                 4
             }
+            0xB1 => {
+                // OR C
+                self.a |= self.c;
+                self.set_zero_flag(self.a == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(false);
+                4
+            }
             0xC3 => {
                 // JP nn
                 let addr = self.fetch_word(bus);
@@ -463,11 +472,27 @@ mod tests {
         assert_eq!(cpu.a, 0x00, "A ^ A is always 0");
         assert!(cpu.get_zero_flag(), "zero result should set Z");
         assert!(!cpu.get_subtract_flag(), "XOR always clears N");
-        assert!(
-            !cpu.get_half_carry_flag(),
-            "XOR always clears H — opposite of AND"
-        );
+        assert!(!cpu.get_half_carry_flag(), "XOR always clears H");
         assert!(!cpu.get_carry_flag(), "XOR always clears C");
+    }
+
+    // 0xB1 OR C
+
+    #[test]
+    fn or_c_sets_z_and_clears_nhc() {
+        let (mut cpu, mut bus) = setup(&[0xB1]);
+        cpu.a = 0x59;
+        cpu.c = 0x5A;
+        cpu.set_half_carry_flag(true); // pre-set H: proves OR clears it (AND sets it)
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "OR C should take 4 cycles");
+        assert_eq!(cpu.a, 0x5B, "result of A | C lands in A");
+        assert!(!cpu.get_zero_flag(), "nonzero result should clear Z");
+        assert!(!cpu.get_subtract_flag(), "OR always clears N");
+        assert!(!cpu.get_half_carry_flag(), "OR always clears H");
+        assert!(!cpu.get_carry_flag(), "OR always clears carry");
     }
 
     // 0xC9 RET (with 0xCD CALL)
