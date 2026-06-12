@@ -24,6 +24,7 @@ pub struct Cpu {
 
 impl Cpu {
     pub fn new() -> Self {
+        // Post-boot register state (DMG)
         Cpu {
             a: 0x01,
             f: 0xB0,
@@ -39,6 +40,189 @@ impl Cpu {
             halted: false,
         }
     }
+
+    // Public API
+
+    pub fn step(&mut self, bus: &mut Bus) -> u8 {
+        // Trace must fire before the fetch: the Doctor format reports the
+        // state at the instruction boundary (PC = this instruction's
+        // address, PCMEM = its bytes). After the fetch, pc has advanced.
+        if TRACE {
+            self.print_trace(bus);
+        }
+
+        let pc = self.pc;
+        let opcode = self.fetch_byte(bus);
+
+        match opcode {
+            0x00 => 4, // NOP
+            0x01 => {
+                // LD BC, nn - load a 16-bit immediate into BC
+                let nn = self.fetch_word(bus);
+                self.set_bc(nn);
+                12
+            }
+            0x20 => {
+                // JR NZ, e
+                // if Z is clear, hop forward or backward by e bytes
+                // otherwise fall through to the next instruction
+                let offset = self.fetch_byte(bus) as i8;
+                if !self.get_zero_flag() {
+                    self.pc = self.pc.wrapping_add(offset as u16); // taken
+                    12
+                } else {
+                    8 // not taken: just fall through
+                }
+            }
+            0x21 => {
+                // LD HL, nn - load a 16-bit immediate into HL
+                let nn = self.fetch_word(bus);
+                self.set_hl(nn);
+                12
+            }
+            0x22 => {
+                // LD (HL+), A - store A into memory at address HL, then increment HL
+                let addr = self.get_hl();
+                bus.write_byte(addr, self.a);
+                self.set_hl(addr.wrapping_add(1));
+                8
+            }
+            0x31 => {
+                // LD SP, nn - load a 16-bit immediate into the stack pointer
+                self.sp = self.fetch_word(bus);
+                12
+            }
+            0xAF => {
+                // XOR A
+                // XOR the A register with itself
+                self.a ^= self.a;
+                self.set_zero_flag(self.a == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(false);
+                4
+            }
+            0xC3 => {
+                // JP nn
+                let addr = self.fetch_word(bus);
+                self.pc = addr;
+                16
+            }
+            0xC9 => {
+                // RET
+                self.pc = self.pop_word(bus);
+                16
+            }
+            0xCB => self.step_cb(bus), // hand off to the CB table
+            0xCD => {
+                // CALL nn
+                let target = self.fetch_word(bus);
+                self.push_word(bus, self.pc);
+                self.pc = target;
+                24
+            }
+            0xE0 => {
+                // LDH (n), A - store from A to the high page
+                let n = self.fetch_byte(bus);
+                let addr = 0xFF00 | (n as u16);
+                bus.write_byte(addr, self.a);
+                12
+            }
+            0xE6 => {
+                // AND n
+                // Fetches one immediate byte and bitwise-ANDs it into A
+                // A = A & n
+                let n = self.fetch_byte(bus);
+                self.a &= n;
+                self.set_zero_flag(self.a == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(true);
+                self.set_carry_flag(false);
+                8
+            }
+            0xF0 => {
+                // LDH A, (n) - load into A from the high page
+                let n = self.fetch_byte(bus);
+                let addr = 0xFF00 | (n as u16);
+                self.a = bus.read_byte(addr);
+                12
+            }
+            0xFE => {
+                // CP n
+                let n = self.fetch_byte(bus);
+                let a = self.a;
+                self.set_zero_flag(a == n);
+                self.set_subtract_flag(true);
+                self.set_half_carry_flag((a & 0x0F) < (n & 0x0F));
+                self.set_carry_flag(a < n);
+                8
+            }
+            _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
+        }
+    }
+
+    fn step_cb(&mut self, bus: &mut Bus) -> u8 {
+        let cb_opcode = self.fetch_byte(bus);
+        match cb_opcode {
+            0x87 => {
+                // RES 0, A
+                self.a &= !0x01;
+                8
+            }
+            _ => panic!("unimplemented CB opcode {:#04x}", cb_opcode),
+        }
+    }
+
+    pub fn print_trace(&self, bus: &Bus) {
+        println!(
+            "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
+            self.a,
+            self.f,
+            self.b,
+            self.c,
+            self.d,
+            self.e,
+            self.h,
+            self.l,
+            self.sp,
+            self.pc,
+            bus.read_byte(self.pc),
+            bus.read_byte(self.pc.wrapping_add(1)),
+            bus.read_byte(self.pc.wrapping_add(2)),
+            bus.read_byte(self.pc.wrapping_add(3)),
+        )
+    }
+
+    pub fn pc(&self) -> u16 {
+        self.pc
+    }
+
+    // Fetch and stack helpers
+
+    fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
+        let byte = bus.read_byte(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        byte
+    }
+
+    fn fetch_word(&mut self, bus: &mut Bus) -> u16 {
+        let low = self.fetch_byte(bus) as u16;
+        let high = self.fetch_byte(bus) as u16;
+        low | (high << 8)
+    }
+
+    fn push_word(&mut self, bus: &mut Bus, value: u16) {
+        self.sp = self.sp.wrapping_sub(2);
+        bus.write_word(self.sp, value);
+    }
+
+    fn pop_word(&mut self, bus: &mut Bus) -> u16 {
+        let value = bus.read_word(self.sp);
+        self.sp = self.sp.wrapping_add(2);
+        value
+    }
+
+    // Flag accessors (F register, high nibble only)
 
     fn get_zero_flag(&self) -> bool {
         (self.f & ZERO_FLAG) != 0
@@ -88,168 +272,7 @@ impl Cpu {
         }
     }
 
-    fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
-        let byte = bus.read_byte(self.pc);
-        self.pc = self.pc.wrapping_add(1);
-        byte
-    }
-
-    fn fetch_word(&mut self, bus: &mut Bus) -> u16 {
-        let low = self.fetch_byte(bus) as u16;
-        let high = self.fetch_byte(bus) as u16;
-        low | (high << 8)
-    }
-
-    fn push_word(&mut self, bus: &mut Bus, value: u16) {
-        self.sp = self.sp.wrapping_sub(2);
-        bus.write_word(self.sp, value);
-    }
-
-    fn pop_word(&mut self, bus: &mut Bus) -> u16 {
-        let value = bus.read_word(self.sp);
-        self.sp = self.sp.wrapping_add(2);
-        value
-    }
-
-    pub fn print_trace(&self, bus: &Bus) {
-        println!(
-            "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
-            self.a,
-            self.f,
-            self.b,
-            self.c,
-            self.d,
-            self.e,
-            self.h,
-            self.l,
-            self.sp,
-            self.pc,
-            bus.read_byte(self.pc),
-            bus.read_byte(self.pc.wrapping_add(1)),
-            bus.read_byte(self.pc.wrapping_add(2)),
-            bus.read_byte(self.pc.wrapping_add(3)),
-        )
-    }
-
-    pub fn step(&mut self, bus: &mut Bus) -> u8 {
-        let pc = self.pc;
-        let opcode = self.fetch_byte(bus);
-
-        if TRACE {
-            self.print_trace(bus);
-        }
-
-        match opcode {
-            0x00 => 4, // NOP
-            0xC3 => {
-                // JP nn
-                let addr = self.fetch_word(bus);
-                self.pc = addr;
-                16
-            }
-            0xCD => {
-                // CALL nn
-                let target = self.fetch_word(bus);
-                self.push_word(bus, self.pc);
-                self.pc = target;
-                24
-            }
-            0xC9 => {
-                // RET
-                self.pc = self.pop_word(bus);
-                16
-            }
-            0xF0 => {
-                // LDH A, (n) - load into A from the high page
-                let n = self.fetch_byte(bus);
-                let addr = 0xFF00 | (n as u16);
-                self.a = bus.read_byte(addr);
-                12
-            }
-            0xE0 => {
-                // LDH (n), A - store from A to the high page
-                let n = self.fetch_byte(bus);
-                let addr = 0xFF00 | (n as u16);
-                bus.write_byte(addr, self.a);
-                12
-            }
-            0xCB => self.step_cb(bus), // hand off to the CB table
-            0xFE => {
-                // CP n
-                let n = self.fetch_byte(bus);
-                let a = self.a;
-                self.set_zero_flag(a == n);
-                self.set_subtract_flag(true);
-                self.set_half_carry_flag((a & 0x0F) < (n & 0x0F));
-                self.set_carry_flag(a < n);
-                8
-            }
-            0x20 => {
-                // JR NZ, e
-                // if Z is clear, hop forward or backward by e bytes
-                // otherwise fall through to the next instruction
-                let offset = self.fetch_byte(bus) as i8;
-                if !self.get_zero_flag() {
-                    self.pc = self.pc.wrapping_add(offset as u16); // taken
-                    12
-                } else {
-                    8 // not taken: just fall through
-                }
-            }
-            0xE6 => {
-                // AND n
-                // Fetches one immediate byte and bitwise-ANDs it into A
-                // A = A & n
-                let n = self.fetch_byte(bus);
-                self.a &= n;
-                self.set_zero_flag(self.a == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag(true);
-                self.set_carry_flag(false);
-                8
-            }
-            0x31 => {
-                // LD SP, nn - load a 16-bit immediate into the stack pointer
-                self.sp = self.fetch_word(bus);
-                12
-            }
-            0x21 => {
-                // LD HL, nn - load a 16-bit immediate into HL
-                let nn = self.fetch_word(bus);
-                self.set_hl(nn);
-                12
-            }
-            0x01 => {
-                // LD BC, nn - load a 16-bit immediate into BC
-                let nn = self.fetch_word(bus);
-                self.set_bc(nn);
-                12
-            }
-            0xAF => {
-                // XOR A
-                // XOR the A register with itself
-                self.a ^= self.a;
-                self.set_zero_flag(self.a == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag(false);
-                self.set_carry_flag(false);
-                4
-            }
-            _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
-        }
-    }
-
-    fn step_cb(&mut self, bus: &mut Bus) -> u8 {
-        let cb_opcode = self.fetch_byte(bus);
-        match cb_opcode {
-            0x87 => {
-                // RES 0, A
-                self.a &= !0x01;
-                8
-            }
-            _ => panic!("unimplemented CB opcode {:#04x}", cb_opcode),
-        }
-    }
+    // Register pair accessors
 
     fn get_af(&self) -> u16 {
         (self.a as u16) << 8 | self.f as u16
@@ -257,7 +280,7 @@ impl Cpu {
 
     fn set_af(&mut self, value: u16) {
         self.a = (value >> 8) as u8;
-        self.f = (value as u8) & 0xF0;
+        self.f = (value as u8) & 0xF0; // F low nibble is always zero
     }
 
     fn get_bc(&self) -> u16 {
@@ -286,10 +309,6 @@ impl Cpu {
         self.h = (value >> 8) as u8;
         self.l = value as u8;
     }
-
-    pub fn pc(&self) -> u16 {
-        self.pc
-    }
 }
 
 #[cfg(test)]
@@ -305,6 +324,8 @@ mod tests {
         }
         (cpu, bus)
     }
+
+    // 0x00 NOP
 
     #[test]
     fn nop_advances_pc_and_touches_nothing_else() {
@@ -322,6 +343,122 @@ mod tests {
         assert_eq!(cpu.get_bc(), bc_before, "NOP must not touch BC");
         assert_eq!(cpu.sp, sp_before, "NOP must not touch sp");
     }
+
+    // 0x20 JR NZ, e
+
+    #[test]
+    fn jr_nz_taken_jumps_backward() {
+        // Z clear -> branch taken
+        // Offset 0xFA = -6 (signed)
+        // After fetching the 2-byte instruction, pc = 0xC002
+        // Applying -6:  0xC002 - 6 = 0xBFFC
+        let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
+        assert_eq!(
+            cpu.pc, 0xBFFC,
+            "taken backward jump: 0xC002 + (-6) = 0xBFFC"
+        );
+    }
+
+    #[test]
+    fn jr_nz_taken_jumps_forward() {
+        // Z clear -> taken
+        // Offset 0x05 = +5 (signed)
+        // After fetch pc = 0xC002, applying +5 -> 0xC007
+        let (mut cpu, mut bus) = setup(&[0x20, 0x05]); // JR NZ, +5
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
+        assert_eq!(cpu.pc, 0xC007, "taken forward jump: 0xC002 + 5 = 0xC007");
+    }
+
+    #[test]
+    fn jr_nz_not_taken_falls_through() {
+        // Z set -> branch not taken
+        // The offset byte is still consumed,
+        // so pc must advance past the full 2-byte instruction to 0xC002,
+        // and the offset must not be applied
+        let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6 (ignored)
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "not-taken JR should cost 8 cycles");
+        assert_eq!(
+            cpu.pc, 0xC002,
+            "not taken: pc advances past both bytes, offset not applied"
+        );
+    }
+
+    // 0x22 LD (HL+), A
+
+    #[test]
+    fn ld_hl_inc_a_stores_and_bumps_pointer() {
+        // Store A through the HL pointer, then HL increments by 1
+        let (mut cpu, mut bus) = setup(&[0x22]); // LD (HL+), A
+        cpu.set_hl(0xC050);
+        cpu.a = 0x5A; // nonzero, so the store is provable against zeroed WRAM
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "LD (HL+), A should take 8 cycles");
+        assert_eq!(
+            bus.read_byte(0xC050),
+            0x5A,
+            "A should be stored at the original HL address"
+        );
+        assert_eq!(cpu.get_hl(), 0xC051, "HL should increment after the store");
+    }
+
+    #[test]
+    fn ld_hl_inc_a_carries_across_page_boundary() {
+        // HL = 0xC0FF: the increment must carry from l into h
+        // An l-only increment bug would wrap to 0xC000 instead of 0xC100
+        let (mut cpu, mut bus) = setup(&[0x22]); // LD (HL+), A
+        cpu.set_hl(0xC0FF);
+        cpu.a = 0x77;
+
+        cpu.step(&mut bus);
+
+        assert_eq!(
+            bus.read_byte(0xC0FF),
+            0x77,
+            "store happens at the pre-increment address"
+        );
+        assert_eq!(cpu.h, 0xC1, "carry must propagate into h");
+        assert_eq!(cpu.l, 0x00, "l wraps to zero");
+    }
+
+    // 0xAF XOR A
+
+    #[test]
+    fn xor_a_zeroes_a_and_clears_nhc() {
+        // XOR A always produces 0. Start A nonzero so the test
+        // proves the XOR did the zeroing
+        let (mut cpu, mut bus) = setup(&[0xAF]); // XOR A
+        cpu.a = 0x5A;
+        cpu.set_half_carry_flag(true); // pre-set H: proves XOR clears it (AND sets it)
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "XOR A should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "A ^ A is always 0");
+        assert!(cpu.get_zero_flag(), "zero result should set Z");
+        assert!(!cpu.get_subtract_flag(), "XOR always clears N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "XOR always clears H — opposite of AND"
+        );
+        assert!(!cpu.get_carry_flag(), "XOR always clears C");
+    }
+
+    // 0xC9 RET (with 0xCD CALL)
 
     #[test]
     fn call_pushes_return_address_and_jumps() {
@@ -365,6 +502,43 @@ mod tests {
             "stack should fully unwind: push then pop nets zero"
         );
     }
+
+    // 0xE6 AND n
+
+    #[test]
+    fn and_n_nonzero_result() {
+        // AND 0x3C with A=0xF0 -> 0x30
+        let (mut cpu, mut bus) = setup(&[0xE6, 0x3C]);
+        cpu.a = 0xF0;
+        cpu.set_carry_flag(true); // pre-set C: proves AND clears it
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x30);
+        assert_eq!(cycles, 8);
+        assert!(!cpu.get_zero_flag());
+        assert!(!cpu.get_subtract_flag());
+        assert!(cpu.get_half_carry_flag());
+        assert!(!cpu.get_carry_flag());
+    }
+
+    #[test]
+    fn and_n_zero_result() {
+        // AND 0x0F with A=0xF0 -> 0x00
+        let (mut cpu, mut bus) = setup(&[0xE6, 0x0F]);
+        cpu.a = 0xF0;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x00);
+        assert_eq!(cycles, 8);
+        assert!(cpu.get_zero_flag());
+        assert!(!cpu.get_subtract_flag());
+        assert!(cpu.get_half_carry_flag());
+        assert!(!cpu.get_carry_flag());
+    }
+
+    // 0xFE CP n
 
     #[test]
     fn cp_equal_sets_zero_clears_carry() {
@@ -422,109 +596,5 @@ mod tests {
             !cpu.get_carry_flag(),
             "0x10 > 0x01 overall, so no full borrow: C clear"
         );
-    }
-
-    #[test]
-    fn jr_nz_taken_jumps_backward() {
-        // Z clear -> branch taken
-        // Offset 0xFA = -6 (signed)
-        // After fetching the 2-byte instruction, pc = 0xC002
-        // Applying -6:  0xC002 - 6 = 0xBFFC
-        let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6
-        cpu.set_zero_flag(false);
-
-        let cycles = cpu.step(&mut bus);
-
-        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
-        assert_eq!(
-            cpu.pc, 0xBFFC,
-            "taken backward jump: 0xC002 + (-6) = 0xBFFC"
-        );
-    }
-
-    #[test]
-    fn jr_nz_taken_jumps_forward() {
-        // Z clear -> taken
-        // Offset 0x05 = +5 (signed)
-        // After fetch pc = 0xC002, applying +5 -> 0xC007
-        let (mut cpu, mut bus) = setup(&[0x20, 0x05]); // JR NZ, +5
-        cpu.set_zero_flag(false);
-
-        let cycles = cpu.step(&mut bus);
-
-        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
-        assert_eq!(cpu.pc, 0xC007, "taken forward jump: 0xC002 + 5 = 0xC007");
-    }
-
-    #[test]
-    fn jr_nz_not_taken_falls_through() {
-        // Z set -> branch not taken
-        // The offset byte is still consumed,
-        // so pc must advance past the full 2-byte instruction to 0xC002,
-        // and the offset must not be applied
-        let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6 (ignored)
-        cpu.set_zero_flag(true);
-
-        let cycles = cpu.step(&mut bus);
-
-        assert_eq!(cycles, 8, "not-taken JR should cost 8 cycles");
-        assert_eq!(
-            cpu.pc, 0xC002,
-            "not taken: pc advances past both bytes, offset not applied"
-        );
-    }
-
-    #[test]
-    fn test_and_n_nonzero_result() {
-        // AND 0x3C with A=0xF0 -> 0x30
-        let (mut cpu, mut bus) = setup(&[0xE6, 0x3C]);
-        cpu.a = 0xF0;
-        cpu.set_carry_flag(true);
-
-        let cycles = cpu.step(&mut bus);
-
-        assert_eq!(cpu.a, 0x30);
-        assert_eq!(cycles, 8);
-        assert!(!cpu.get_zero_flag());
-        assert!(!cpu.get_subtract_flag());
-        assert!(cpu.get_half_carry_flag());
-        assert!(!cpu.get_carry_flag());
-    }
-
-    #[test]
-    fn test_and_n_zero_result() {
-        // AND 0x0F with A=0xF0 -> 0x00
-        let (mut cpu, mut bus) = setup(&[0xE6, 0x0F]);
-        cpu.a = 0xF0;
-
-        let cycles = cpu.step(&mut bus);
-
-        assert_eq!(cpu.a, 0x00);
-        assert_eq!(cycles, 8);
-        assert!(cpu.get_zero_flag());
-        assert!(!cpu.get_subtract_flag());
-        assert!(cpu.get_half_carry_flag());
-        assert!(!cpu.get_carry_flag());
-    }
-
-    #[test]
-    fn xor_a_zeroes_a_and_clears_nhc() {
-        // XOR A always produces 0. Start A nonzero so the test
-        // proves the XOR did the zeroing
-        let (mut cpu, mut bus) = setup(&[0xAF]); // XOR A
-        cpu.a = 0x5A;
-        cpu.set_half_carry_flag(true); // pre-set H: proves XOR clears it (AND sets it)
-
-        let cycles = cpu.step(&mut bus);
-
-        assert_eq!(cycles, 4, "XOR A should take 4 cycles");
-        assert_eq!(cpu.a, 0x00, "A ^ A is always 0");
-        assert!(cpu.get_zero_flag(), "zero result should set Z");
-        assert!(!cpu.get_subtract_flag(), "XOR always clears N");
-        assert!(
-            !cpu.get_half_carry_flag(),
-            "XOR always clears H — opposite of AND"
-        );
-        assert!(!cpu.get_carry_flag(), "XOR always clears C");
     }
 }
