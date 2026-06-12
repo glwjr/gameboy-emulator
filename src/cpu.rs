@@ -62,6 +62,13 @@ impl Cpu {
                 self.set_bc(nn);
                 12
             }
+            0x0B => {
+                // DEC BC
+                // Decrement the BC register pair -- no flags
+                let bc = self.get_bc();
+                self.set_bc(bc.wrapping_sub(1));
+                8
+            }
             0x20 => {
                 // JR NZ, e
                 // if Z is clear, hop forward or backward by e bytes
