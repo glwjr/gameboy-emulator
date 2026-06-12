@@ -99,6 +99,35 @@ impl Cpu {
                 self.c = self.fetch_byte(bus);
                 8
             }
+            0x11 => {
+                // LD DE, nn
+                let nn = self.fetch_word(bus);
+                self.set_de(nn);
+                12
+            }
+            0x12 => {
+                // LD (DE), A
+                let addr = self.get_de();
+                bus.write_byte(addr, self.a);
+                8
+            }
+            0x13 => {
+                // INC DE -- no flags
+                let de = self.get_de();
+                self.set_de(de.wrapping_add(1));
+                8
+            }
+            0x19 => {
+                // ADD HL, DE
+                let hl = self.get_hl();
+                let de = self.get_de();
+                self.set_hl(hl.wrapping_add(de));
+                // Z is preserved -- ADD HL, rr never touches it
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag((hl & 0x0FFF) + (de & 0x0FFF) > 0x0FFF);
+                self.set_carry_flag(hl as u32 + de as u32 > 0xFFFF);
+                8
+            }
             0x20 => {
                 // JR NZ, e
                 // if Z is clear, hop forward or backward by e bytes
@@ -135,6 +164,16 @@ impl Cpu {
                 // LD SP, nn - load a 16-bit immediate into the stack pointer
                 self.sp = self.fetch_word(bus);
                 12
+            }
+            0x3D => {
+                // DEC A
+                let old = self.a;
+                self.a = old.wrapping_sub(1);
+                self.set_zero_flag(self.a == 0);
+                self.set_subtract_flag(true);
+                self.set_half_carry_flag((old & 0x0F) == 0x00);
+                // Carry is preserved -- DEC never touches it
+                4
             }
             0x3E => {
                 // LD A, n - load an immediate byte into A
@@ -511,14 +550,69 @@ mod tests {
         );
     }
 
+    // 0x19 ADD HL, DE
+
+    #[test]
+    fn add_hl_de_no_carries() {
+        let (mut cpu, mut bus) = setup(&[0x19]); // ADD HL, DE
+        cpu.set_hl(0x1234);
+        cpu.set_de(0x0111);
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADD HL should take 8 cycles");
+        assert_eq!(cpu.get_hl(), 0x1345, "0x1234 + 0x0111 lands in HL");
+        assert!(cpu.get_zero_flag(), "Z is preserved");
+        assert!(!cpu.get_subtract_flag(), "ADD clears N");
+        assert!(!cpu.get_half_carry_flag(), "no bit-11 carry: H clear");
+        assert!(!cpu.get_carry_flag(), "no bit-15 carry: C clear");
+    }
+
+    #[test]
+    fn add_hl_de_half_carry_without_carry() {
+        let (mut cpu, mut bus) = setup(&[0x19]); // ADD HL, DE
+        cpu.set_hl(0x0FFF);
+        cpu.set_de(0x0001);
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADD HL, DE should take 8 cycles");
+        assert_eq!(cpu.get_hl(), 0x1000, "0x0FFF + 0x0001 lands in HL");
+        assert!(cpu.get_zero_flag(), "Z is preserved");
+        assert!(!cpu.get_subtract_flag(), "ADD HL, rr clears N");
+        assert!(cpu.get_half_carry_flag(), "bit-11 carry: H sets");
+        assert!(!cpu.get_carry_flag(), "no bit-15 carry: C clear");
+    }
+
+    #[test]
+    fn add_hl_de_wraps_and_preserves_z() {
+        let (mut cpu, mut bus) = setup(&[0x19]); // ADD HL, DE
+        cpu.set_hl(0xFFFF);
+        cpu.set_de(0x0001);
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADD HL, DE should take 8 cycles");
+        assert_eq!(cpu.get_hl(), 0x0000, "0xFFFF + 0x0001 wraps to 0x0000");
+        assert!(
+            !cpu.get_zero_flag(),
+            "result is zero but Z must NOT set -- ADD HL, rr never computes Z"
+        );
+        assert!(cpu.get_subtract_flag() == false, "ADD HL, rr clears N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "0xFFF + 1 overflows twelve bits: H sets"
+        );
+        assert!(cpu.get_carry_flag(), "bit-15 carry: C sets");
+    }
+
     // 0x20 JR NZ, e
 
     #[test]
     fn jr_nz_taken_jumps_backward() {
-        // Z clear -> branch taken
-        // Offset 0xFA = -6 (signed)
-        // After fetching the 2-byte instruction, pc = 0xC002
-        // Applying -6:  0xC002 - 6 = 0xBFFC
         let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6
         cpu.set_zero_flag(false);
 
@@ -533,9 +627,6 @@ mod tests {
 
     #[test]
     fn jr_nz_taken_jumps_forward() {
-        // Z clear -> taken
-        // Offset 0x05 = +5 (signed)
-        // After fetch pc = 0xC002, applying +5 -> 0xC007
         let (mut cpu, mut bus) = setup(&[0x20, 0x05]); // JR NZ, +5
         cpu.set_zero_flag(false);
 
@@ -547,10 +638,6 @@ mod tests {
 
     #[test]
     fn jr_nz_not_taken_falls_through() {
-        // Z set -> branch not taken
-        // The offset byte is still consumed,
-        // so pc must advance past the full 2-byte instruction to 0xC002,
-        // and the offset must not be applied
         let (mut cpu, mut bus) = setup(&[0x20, 0xFA]); // JR NZ, -6 (ignored)
         cpu.set_zero_flag(true);
 
@@ -567,7 +654,6 @@ mod tests {
 
     #[test]
     fn ld_hl_inc_a_stores_and_bumps_pointer() {
-        // Store A through the HL pointer, then HL increments by 1
         let (mut cpu, mut bus) = setup(&[0x22]); // LD (HL+), A
         cpu.set_hl(0xC050);
         cpu.a = 0x5A; // nonzero, so the store is provable against zeroed WRAM
@@ -585,8 +671,6 @@ mod tests {
 
     #[test]
     fn ld_hl_inc_a_carries_across_page_boundary() {
-        // HL = 0xC0FF: the increment must carry from l into h
-        // An l-only increment bug would wrap to 0xC000 instead of 0xC100
         let (mut cpu, mut bus) = setup(&[0x22]); // LD (HL+), A
         cpu.set_hl(0xC0FF);
         cpu.a = 0x77;
@@ -606,8 +690,6 @@ mod tests {
 
     #[test]
     fn xor_a_zeroes_a_and_clears_nhc() {
-        // XOR A always produces 0. Start A nonzero so the test
-        // proves the XOR did the zeroing
         let (mut cpu, mut bus) = setup(&[0xAF]); // XOR A
         cpu.a = 0x5A;
         cpu.set_half_carry_flag(true); // pre-set H: proves XOR clears it (AND sets it)
@@ -663,10 +745,6 @@ mod tests {
 
     #[test]
     fn call_then_ret_round_trips() {
-        // CALL 0xC100, where a RET is planted
-        // Step 1 (CALL): Pushes 0xC003, jumps to 0xC100, sp -> 0xFFFC
-        // Step 2 (RET): Pops 0xC003 back into pc, sp -> 0xFFFE
-        // The invariant: pc lands after the CALL, sp fully unwinds
         let (mut cpu, mut bus) = setup(&[0xCD, 0x00, 0xC1]); // CALL 0xC100
         bus.write_byte(0xC100, 0xC9); // plant RET at the call target
 
@@ -690,7 +768,6 @@ mod tests {
 
     #[test]
     fn and_n_nonzero_result() {
-        // AND 0x3C with A=0xF0 -> 0x30
         let (mut cpu, mut bus) = setup(&[0xE6, 0x3C]);
         cpu.a = 0xF0;
         cpu.set_carry_flag(true); // pre-set C: proves AND clears it
@@ -707,7 +784,6 @@ mod tests {
 
     #[test]
     fn and_n_zero_result() {
-        // AND 0x0F with A=0xF0 -> 0x00
         let (mut cpu, mut bus) = setup(&[0xE6, 0x0F]);
         cpu.a = 0xF0;
 
@@ -725,8 +801,6 @@ mod tests {
 
     #[test]
     fn cp_equal_sets_zero_clears_carry() {
-        // A == n
-        // Result is zero, no borrow anywhere
         let (mut cpu, mut bus) = setup(&[0xFE, 0x42]); // CP 0x42
         cpu.a = 0x42;
 
@@ -742,8 +816,6 @@ mod tests {
 
     #[test]
     fn cp_smaller_a_sets_carry_and_half_carry() {
-        // A < n with a low-nibble borrow
-        // 0x00 - 0x91
         let (mut cpu, mut bus) = setup(&[0xFE, 0x91]); // CP 0x91
         cpu.a = 0x00;
 
@@ -761,8 +833,6 @@ mod tests {
 
     #[test]
     fn cp_half_carry_without_full_carry() {
-        // A > n overall (no full borrow), but the low
-        // nibble still borrows: 0x10 - 0x01
         let (mut cpu, mut bus) = setup(&[0xFE, 0x01]); // CP 0x01
         cpu.a = 0x10;
 
