@@ -182,6 +182,13 @@ impl Cpu {
                 self.a = self.fetch_byte(bus);
                 8
             }
+            0x36 => {
+                // LD (HL), n
+                let n = self.fetch_byte(bus);
+                let addr = self.get_hl();
+                bus.write_byte(addr, n);
+                12
+            }
             0x76 => panic!("HALT not yet implemented"),
             0x40..=0x7F => {
                 let dst = (opcode >> 3) & 0x07;
@@ -210,6 +217,12 @@ impl Cpu {
                 self.set_carry_flag(false);
                 4
             }
+            0xB8..=0xBF => {
+                let src = opcode & 0x07;
+                let v = self.read_r8(bus, src);
+                self.alu_cp(v);
+                if src == 6 { 8 } else { 4 }
+            }
             0xC3 => {
                 // JP nn
                 let addr = self.fetch_word(bus);
@@ -236,11 +249,23 @@ impl Cpu {
                 bus.write_byte(addr, self.a);
                 12
             }
+            0xE1 => {
+                // POP HL
+                let value = self.pop_word(bus);
+                self.set_hl(value);
+                12
+            }
             0xE2 => {
                 // LD (C), A - store A at 0xFF00 plus C
                 let addr = 0xFF00 | (self.c as u16);
                 bus.write_byte(addr, self.a);
                 8
+            }
+            0xE5 => {
+                // PUSH HL
+                let value = self.get_hl();
+                self.push_word(bus, value);
+                16
             }
             0xE6 => {
                 // AND n
@@ -269,11 +294,7 @@ impl Cpu {
             0xFE => {
                 // CP n
                 let n = self.fetch_byte(bus);
-                let a = self.a;
-                self.set_zero_flag(a == n);
-                self.set_subtract_flag(true);
-                self.set_half_carry_flag((a & 0x0F) < (n & 0x0F));
-                self.set_carry_flag(a < n);
+                self.alu_cp(n);
                 8
             }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
@@ -369,6 +390,15 @@ impl Cpu {
             7 => self.a = value,
             _ => panic!("invalid r8 index: {}", index),
         }
+    }
+
+    // ALU collapse
+    fn alu_cp(&mut self, value: u8) {
+        let a = self.a;
+        self.set_zero_flag(a == value);
+        self.set_subtract_flag(true);
+        self.set_half_carry_flag((a & 0x0F) < (value & 0x0F));
+        self.set_carry_flag(a < value);
     }
 
     // Flag accessors (F register, high nibble only)
