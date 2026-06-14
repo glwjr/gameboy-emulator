@@ -208,10 +208,26 @@ impl Cpu {
                 self.alu_cp(v);
                 if src == 6 { 8 } else { 4 }
             }
+            0xC2 | 0xCA | 0xD2 | 0xDA => {
+                let condition = match (opcode >> 3) & 0x03 {
+                    0 => !self.get_zero_flag(),
+                    1 => self.get_zero_flag(),
+                    2 => !self.get_carry_flag(),
+                    3 => self.get_carry_flag(),
+                    _ => unreachable!(),
+                };
+                self.jp_conditional(bus, condition)
+            }
             0xC3 => {
                 // JP nn
                 let addr = self.fetch_word(bus);
                 self.pc = addr;
+                16
+            }
+            0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
+                let target = ((opcode >> 3) & 0x07) as u16 * 8;
+                self.push_word(bus, self.pc);
+                self.pc = target;
                 16
             }
             0xC9 => {
@@ -271,6 +287,14 @@ impl Cpu {
                 let addr = 0xFF00 | (n as u16);
                 self.a = bus.read_byte(addr);
                 12
+            }
+            0xFA => {
+                // LD A, (nn)
+                // Fetch a 16-bit immediate address and load
+                // the byte from that address into A
+                let addr = self.fetch_word(bus);
+                self.a = bus.read_byte(addr);
+                16
             }
             0xFE => {
                 // CP n
@@ -398,6 +422,16 @@ impl Cpu {
             12
         } else {
             8
+        }
+    }
+
+    fn jp_conditional(&mut self, bus: &mut Bus, condition: bool) -> u8 {
+        let target = self.fetch_word(bus);
+        if condition {
+            self.pc = target;
+            16
+        } else {
+            12
         }
     }
 
@@ -876,6 +910,36 @@ mod tests {
         assert!(!cpu.get_carry_flag(), "OR always clears carry");
     }
 
+    // 0xC7..=0xFF RST -- single-byte call to a fixed vector (ttt * 8)
+
+    #[test]
+    fn rst_00_pushes_return_and_jumps_to_vector() {
+        let (mut cpu, mut bus) = setup(&[0xC7]); // RST 00h
+        // setup put pc at 0xC000
+        // after fetching the 1-byte RST, the return address is 0xC001
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 16, "RST should take 16 cycles");
+        assert_eq!(cpu.pc, 0x0000, "RST 00h jumps to vector 0x0000");
+        assert_eq!(cpu.sp, 0xFFFC, "RST pushes 2 bytes: sp -= 2");
+        assert_eq!(
+            bus.read_word(cpu.sp),
+            0xC001,
+            "pushed return address is the instruction after RST"
+        );
+    }
+
+    #[test]
+    fn rst_38_computes_high_vector() {
+        let (mut cpu, mut bus) = setup(&[0xFF]); // RST 38h
+        cpu.step(&mut bus);
+        assert_eq!(
+            cpu.pc, 0x0038,
+            "RST 38h jumps to 0x0038 -- proves ttt decode isn't constant"
+        );
+    }
+
     // 0xC9 RET (with 0xCD CALL)
 
     #[test]
@@ -914,6 +978,36 @@ mod tests {
         assert_eq!(
             cpu.sp, 0xFFFE,
             "stack should fully unwind: push then pop nets zero"
+        );
+    }
+
+    // 0xCA JP Z, nn -- condition decode through the collapsed conditional-JP arm
+
+    #[test]
+    fn jp_z_taken_when_zero_set() {
+        // Z set -> absolute jump taken
+        let (mut cpu, mut bus) = setup(&[0xCA, 0x34, 0x12]); // JP Z, 0x1234
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 16, "taken JP should cost 16 cycles");
+        assert_eq!(cpu.pc, 0x1234, "Z set: jump taken to the operand address");
+    }
+
+    #[test]
+    fn jp_z_not_taken_consumes_operand() {
+        // Z clear -> not taken
+        // pc must still advance past all 3 bytes (0xC003)
+        let (mut cpu, mut bus) = setup(&[0xCA, 0x34, 0x12]); // JP Z, 0x1234 (ignored)
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "not-taken JP should cost 12 cycles");
+        assert_eq!(
+            cpu.pc, 0xC003,
+            "not taken: pc past opcode + 2 operand bytes, no jump applied"
         );
     }
 
