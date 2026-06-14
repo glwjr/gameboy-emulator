@@ -122,17 +122,15 @@ impl Cpu {
                 self.set_carry_flag(hl as u32 + de as u32 > 0xFFFF);
                 8
             }
-            0x20 => {
-                // JR NZ, e
-                // if Z is clear, hop forward or backward by e bytes
-                // otherwise fall through to the next instruction
-                let offset = self.fetch_byte(bus) as i8;
-                if !self.get_zero_flag() {
-                    self.pc = self.pc.wrapping_add(offset as u16); // taken
-                    12
-                } else {
-                    8 // not taken: just fall through
-                }
+            0x20 | 0x28 | 0x30 | 0x38 => {
+                let condition = match (opcode >> 3) & 0x03 {
+                    0 => !self.get_zero_flag(),  // NZ
+                    1 => self.get_zero_flag(),   // Z
+                    2 => !self.get_carry_flag(), // NC
+                    3 => self.get_carry_flag(),  // C
+                    _ => unreachable!(),         // 2-bit mask can't exceed 3
+                };
+                self.jr_conditional(bus, condition)
             }
             0x21 => {
                 // LD HL, nn - load a 16-bit immediate into HL
@@ -390,6 +388,16 @@ impl Cpu {
         self.set_half_carry_flag((value & 0x0F) == 0x00);
         // Carry is preserved -- DEC never touches it
         result
+    }
+
+    fn jr_conditional(&mut self, bus: &mut Bus, condition: bool) -> u8 {
+        let offset = self.fetch_byte(bus) as i8;
+        if condition {
+            self.pc = self.pc.wrapping_add(offset as u16);
+            12
+        } else {
+            8
+        }
     }
 
     // ALU collapse
@@ -777,6 +785,19 @@ mod tests {
         );
         assert_eq!(cpu.h, 0xC1, "carry must propagate into h");
         assert_eq!(cpu.l, 0x00, "l wraps to zero");
+    }
+
+    // 0x38 JR C, e
+
+    #[test]
+    fn jr_c_taken_when_carry_set() {
+        let (mut cpu, mut bus) = setup(&[0x38, 0x05]); // JR C, +5
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
+        assert_eq!(cpu.pc, 0xC007, "carry set: jump taken, 0xC002 + 5 = 0xC007");
     }
 
     // 0x46 LD B, (HL)
