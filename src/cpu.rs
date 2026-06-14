@@ -1,5 +1,3 @@
-use core::panic;
-
 use crate::bus::Bus;
 
 const TRACE: bool = false;
@@ -64,20 +62,24 @@ impl Cpu {
                 self.set_bc(nn);
                 12
             }
-            0x05 => {
-                // DEC B
-                let old = self.b;
-                self.b = old.wrapping_sub(1);
-                self.set_zero_flag(self.b == 0);
-                self.set_subtract_flag(true);
-                self.set_half_carry_flag((old & 0x0F) == 0x00);
-                // Carry is preserved -- DEC never touches it
-                4
-            }
             0x06 => {
                 // LD B, n
                 self.b = self.fetch_byte(bus);
                 8
+            }
+            0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
+                let dst = (opcode >> 3) & 0x07;
+                let v = self.read_r8(bus, dst);
+                let r = self.inc_r8(v);
+                self.write_r8(bus, dst, r);
+                if dst == 6 { 12 } else { 4 }
+            }
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
+                let dst = (opcode >> 3) & 0x07;
+                let v = self.read_r8(bus, dst);
+                let r = self.dec_r8(v);
+                self.write_r8(bus, dst, r);
+                if dst == 6 { 12 } else { 4 }
             }
             0x0B => {
                 // DEC BC
@@ -85,16 +87,6 @@ impl Cpu {
                 let bc = self.get_bc();
                 self.set_bc(bc.wrapping_sub(1));
                 8
-            }
-            0x0C => {
-                // INC C
-                let old = self.c;
-                self.c = old.wrapping_add(1);
-                self.set_zero_flag(self.c == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag((old & 0x0F) == 0x0F);
-                // Carry is preserved -- INC never touches it
-                4
             }
             0x0E => {
                 // LD C, n - load an immediate byte into C
@@ -167,16 +159,6 @@ impl Cpu {
                 self.sp = self.fetch_word(bus);
                 12
             }
-            0x3D => {
-                // DEC A
-                let old = self.a;
-                self.a = old.wrapping_sub(1);
-                self.set_zero_flag(self.a == 0);
-                self.set_subtract_flag(true);
-                self.set_half_carry_flag((old & 0x0F) == 0x00);
-                // Carry is preserved -- DEC never touches it
-                4
-            }
             0x3E => {
                 // LD A, n - load an immediate byte into A
                 self.a = self.fetch_byte(bus);
@@ -189,7 +171,7 @@ impl Cpu {
                 bus.write_byte(addr, n);
                 12
             }
-            0x76 => panic!("HALT not yet implemented"),
+            0x76 => panic!("HALT not yet implemented"), // must precede 0x40..=0x7F
             0x40..=0x7F => {
                 let dst = (opcode >> 3) & 0x07;
                 let src = opcode & 0x07;
@@ -392,7 +374,26 @@ impl Cpu {
         }
     }
 
+    fn inc_r8(&mut self, value: u8) -> u8 {
+        let result = value.wrapping_add(1);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag((value & 0x0F) == 0x0F);
+        // Carry is preserved -- INC never touches it
+        result
+    }
+
+    fn dec_r8(&mut self, value: u8) -> u8 {
+        let result = value.wrapping_sub(1);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(true);
+        self.set_half_carry_flag((value & 0x0F) == 0x00);
+        // Carry is preserved -- DEC never touches it
+        result
+    }
+
     // ALU collapse
+
     fn alu_cp(&mut self, value: u8) {
         let a = self.a;
         self.set_zero_flag(a == value);
@@ -954,6 +955,60 @@ mod tests {
         assert!(
             !cpu.get_carry_flag(),
             "0x10 > 0x01 overall, so no full borrow: C clear"
+        );
+    }
+
+    // Collapse probes
+
+    #[test]
+    fn inc_a_through_collapsed_row() {
+        let (mut cpu, mut bus) = setup(&[0x3C]); // INC A
+        cpu.a = 0x0F;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "INC A (register target) should take 4 cycles");
+        assert_eq!(cpu.a, 0x10, "0x0F + 1 = 0x10");
+        assert!(cpu.get_half_carry_flag(), "low nibble 0xF overflow: H sets");
+    }
+
+    #[test]
+    fn inc_hl_mem_costs_12() {
+        let (mut cpu, mut bus) = setup(&[0x34]); // INC (HL)
+        cpu.set_hl(0xC050);
+        bus.write_byte(0xC050, 0xFF);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles, 12,
+            "INC (HL) is read-modify-write to memory: 12 cycles"
+        );
+        assert_eq!(
+            bus.read_byte(0xC050),
+            0x00,
+            "0xFF + 1 wraps to 0x00 in memory"
+        );
+        assert!(cpu.get_zero_flag(), "wrapped result is zero: Z set");
+    }
+
+    #[test]
+    fn cp_c_through_collapsed_row() {
+        let (mut cpu, mut bus) = setup(&[0xB9]); // CP C
+        cpu.a = 0x10;
+        cpu.c = 0x01;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "CP C (register source) should take 4 cycles");
+        assert_eq!(cpu.a, 0x10, "CP must not modify A");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "0x10 - 0x01: low-nibble borrow, H sets"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "0x10 > 0x01 overall: no full borrow, C clear"
         );
     }
 }
