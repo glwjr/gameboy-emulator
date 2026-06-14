@@ -122,6 +122,12 @@ impl Cpu {
                 self.set_carry_flag(hl as u32 + de as u32 > 0xFFFF);
                 8
             }
+            0x1B => {
+                // DEC DE -- no flags
+                let de = self.get_de();
+                self.set_de(de.wrapping_sub(1));
+                8
+            }
             0x20 | 0x28 | 0x30 | 0x38 => {
                 let condition = match (opcode >> 3) & 0x03 {
                     0 => !self.get_zero_flag(),  // NZ
@@ -178,24 +184,23 @@ impl Cpu {
 
                 if dst == 6 || src == 6 { 8 } else { 4 }
             }
-            0xAF => {
-                // XOR A
-                // XOR the A register with itself
-                self.a ^= self.a;
-                self.set_zero_flag(self.a == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag(false);
-                self.set_carry_flag(false);
-                4
+            0xA0..=0xA7 => {
+                let s = opcode & 0x07;
+                let v = self.read_r8(bus, s);
+                self.alu_and(v);
+                if s == 6 { 8 } else { 4 }
             }
-            0xB1 => {
-                // OR C
-                self.a |= self.c;
-                self.set_zero_flag(self.a == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag(false);
-                self.set_carry_flag(false);
-                4
+            0xA8..=0xAF => {
+                let s = opcode & 0x07;
+                let v = self.read_r8(bus, s);
+                self.alu_xor(v);
+                if s == 6 { 8 } else { 4 }
+            }
+            0xB0..=0xB7 => {
+                let s = opcode & 0x07;
+                let v = self.read_r8(bus, s);
+                self.alu_or(v);
+                if s == 6 { 8 } else { 4 }
             }
             0xB8..=0xBF => {
                 let src = opcode & 0x07;
@@ -250,11 +255,7 @@ impl Cpu {
             0xE6 => {
                 // AND n
                 let n = self.fetch_byte(bus);
-                self.a &= n;
-                self.set_zero_flag(self.a == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag(true);
-                self.set_carry_flag(false);
+                self.alu_and(n);
                 8
             }
             0xEA => {
@@ -402,12 +403,36 @@ impl Cpu {
 
     // ALU collapse
 
+    fn alu_and(&mut self, value: u8) {
+        self.a &= value;
+        self.set_zero_flag(self.a == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(true);
+        self.set_carry_flag(false);
+    }
+
     fn alu_cp(&mut self, value: u8) {
         let a = self.a;
         self.set_zero_flag(a == value);
         self.set_subtract_flag(true);
         self.set_half_carry_flag((a & 0x0F) < (value & 0x0F));
         self.set_carry_flag(a < value);
+    }
+
+    fn alu_or(&mut self, value: u8) {
+        self.a |= value;
+        self.set_zero_flag(self.a == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(false);
+        self.set_carry_flag(false);
+    }
+
+    fn alu_xor(&mut self, value: u8) {
+        self.a ^= value;
+        self.set_zero_flag(self.a == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(false);
+        self.set_carry_flag(false);
     }
 
     // Flag accessors (F register, high nibble only)
@@ -1031,5 +1056,23 @@ mod tests {
             !cpu.get_carry_flag(),
             "0x10 > 0x01 overall: no full borrow, C clear"
         );
+    }
+
+    #[test]
+    fn and_hl_through_collapsed_row() {
+        let (mut cpu, mut bus) = setup(&[0xA6]); // AND (HL)
+        cpu.a = 0xF0;
+        cpu.set_hl(0xC050);
+        bus.write_byte(0xC050, 0x3C); // operand in memory
+        cpu.set_carry_flag(true); // pre-set: AND must clear it
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "AND (HL) reads memory: 8 cycles, not 4");
+        assert_eq!(cpu.a, 0x30, "0xF0 & 0x3C = 0x30");
+        assert!(!cpu.get_zero_flag(), "nonzero result: Z clear");
+        assert!(!cpu.get_subtract_flag(), "AND clears N");
+        assert!(cpu.get_half_carry_flag(), "AND always sets H -- the quirk");
+        assert!(!cpu.get_carry_flag(), "AND clears C -- was pre-set true");
     }
 }
