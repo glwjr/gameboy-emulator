@@ -110,6 +110,17 @@ impl Cpu {
                 self.set_de(de.wrapping_add(1));
                 8
             }
+            0x17 => {
+                // RLA -- rotate A left through carry. Z always cleared.
+                let old_carry = self.get_carry_flag();
+                let new_carry = (self.a & 0x80) != 0;
+                self.a = (self.a << 1) | (old_carry as u8);
+                self.set_zero_flag(false); // accumulator rotates always clear Z
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(new_carry);
+                4
+            }
             0x19 => {
                 // ADD HL, DE
                 let hl = self.get_hl();
@@ -178,6 +189,13 @@ impl Cpu {
                 self.write_r8(bus, dst, value);
 
                 if dst == 6 || src == 6 { 8 } else { 4 }
+            }
+            0x80..=0x87 => {
+                // ADD A, r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_add(value);
+                if src == 6 { 8 } else { 4 }
             }
             0xA0..=0xA7 => {
                 // AND r
@@ -276,6 +294,11 @@ impl Cpu {
                 let n = self.fetch_byte(bus);
                 self.alu_and(n);
                 8
+            }
+            0xE9 => {
+                // JP HL -- jump to the address in HL (no memory read despite "(HL)" notation)
+                self.pc = self.get_hl();
+                4
             }
             0xEA => {
                 // LD (nn), A
@@ -520,6 +543,16 @@ impl Cpu {
         self.set_carry_flag(false);
     }
 
+    fn alu_add(&mut self, value: u8) {
+        let a = self.a;
+        let (result, carry) = a.overflowing_add(value);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag((a & 0x0F) + (value & 0x0F) > 0x0F);
+        self.set_carry_flag(carry);
+        self.a = result;
+    }
+
     // Flag accessors (F register, high nibble only)
 
     fn get_zero_flag(&self) -> bool {
@@ -759,6 +792,47 @@ mod tests {
             !cpu.get_carry_flag(),
             "INC must preserve carry -- false stays false"
         );
+    }
+
+    // 0x17 RLA -- rotate A left through carry; Z ALWAYS cleared
+
+    #[test]
+    fn rla_clears_z_even_when_result_is_zero() {
+        let (mut cpu, mut bus) = setup(&[0x17]); // RLA
+        cpu.a = 0x80;
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "RLA should take 4 cycles (accumulator rotate)");
+        assert_eq!(cpu.a, 0x00, "0x80 rotated: top bit out, 0 carry into bit 0");
+        assert!(
+            !cpu.get_zero_flag(),
+            "RLA ALWAYS clears Z -- even on a zero result"
+        );
+        assert!(
+            cpu.get_carry_flag(),
+            "old bit 7 (set) becomes the new carry"
+        );
+        assert!(!cpu.get_subtract_flag(), "RLA clears N");
+        assert!(!cpu.get_half_carry_flag(), "RLA clears H");
+    }
+
+    #[test]
+    fn rla_rotates_old_carry_into_bit0() {
+        let (mut cpu, mut bus) = setup(&[0x17]); // RLA
+        cpu.a = 0x00;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "RLA should take 4 cycles");
+        assert_eq!(
+            cpu.a, 0x01,
+            "old carry feeds into bit 0 -- through-carry rotate"
+        );
+        assert!(!cpu.get_carry_flag(), "bit 7 was clear: new carry clear");
+        assert!(!cpu.get_zero_flag(), "RLA clears Z");
     }
 
     // 0x19 ADD HL, DE
@@ -1334,5 +1408,78 @@ mod tests {
         assert!(!cpu.get_subtract_flag(), "AND clears N");
         assert!(cpu.get_half_carry_flag(), "AND always sets H -- the quirk");
         assert!(!cpu.get_carry_flag(), "AND clears C -- was pre-set true");
+    }
+
+    // 0x80..=0x87 ADD A, r
+
+    #[test]
+    fn add_a_c_plain_no_carries() {
+        // A=0x12 + C=0x34 = 0x46. No nibble overflow, no byte overflow.
+        let (mut cpu, mut bus) = setup(&[0x81]); // ADD A, C
+        cpu.a = 0x12;
+        cpu.c = 0x34;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "ADD A, r (register) should take 4 cycles");
+        assert_eq!(cpu.a, 0x46, "0x12 + 0x34 = 0x46");
+        assert!(!cpu.get_zero_flag(), "nonzero result: Z clear");
+        assert!(!cpu.get_subtract_flag(), "ADD clears N -- unlike SUB/CP");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "low nibbles 2+4=6, no overflow: H clear"
+        );
+        assert!(!cpu.get_carry_flag(), "no byte overflow: C clear");
+    }
+
+    #[test]
+    fn add_a_c_half_carry_without_carry() {
+        // A=0x0F + C=0x01 = 0x10. Low nibbles 0xF+0x1 overflow bit 3 -> H set.
+        // Total 0x10 is well under 0xFF -> C clear.
+        let (mut cpu, mut bus) = setup(&[0x81]); // ADD A, C
+        cpu.a = 0x0F;
+        cpu.c = 0x01;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "ADD A, r should take 4 cycles");
+        assert_eq!(cpu.a, 0x10, "0x0F + 0x01 = 0x10");
+        assert!(!cpu.get_zero_flag(), "nonzero result: Z clear");
+        assert!(!cpu.get_subtract_flag(), "ADD clears N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "low nibbles overflow bit 3: H set"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "0x10 << 0xFF: no byte overflow, C clear"
+        );
+    }
+
+    #[test]
+    fn add_a_c_wraps_sets_carry_and_zero() {
+        // A=0xFF + C=0x01 = 0x00 (wraps). Both nibble and byte overflow.
+        // Result is zero -> Z SET.
+        let (mut cpu, mut bus) = setup(&[0x81]); // ADD A, C
+        cpu.a = 0xFF;
+        cpu.c = 0x01;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "ADD A, r should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "0xFF + 0x01 wraps to 0x00");
+        assert!(
+            cpu.get_zero_flag(),
+            "wrapped result is zero: Z SET -- 8-bit ADD computes Z"
+        );
+        assert!(!cpu.get_subtract_flag(), "ADD clears N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "0xF + 0x1 overflows bit 3: H set"
+        );
+        assert!(
+            cpu.get_carry_flag(),
+            "0xFF + 0x01 overflows the byte: C set"
+        );
     }
 }
