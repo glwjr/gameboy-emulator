@@ -219,7 +219,7 @@ impl Cpu {
                 self.pc = self.pop_word(bus);
                 16
             }
-            0xCB => self.step_cb(bus), // hand off to the CB table
+            0xCB => self.step_cb(bus, pc), // hand off to the CB table
             0xCD => {
                 // CALL nn
                 let target = self.fetch_word(bus);
@@ -290,15 +290,27 @@ impl Cpu {
         }
     }
 
-    fn step_cb(&mut self, bus: &mut Bus) -> u8 {
+    fn step_cb(&mut self, bus: &mut Bus, pc: u16) -> u8 {
         let cb_opcode = self.fetch_byte(bus);
         match cb_opcode {
+            0x23 => {
+                // SLA E -- shift E left arithmetically
+                let value = self.read_r8(bus, 3); // E
+                let carry = (value & 0x80) != 0;
+                let result = value << 1;
+                self.set_zero_flag(result == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(carry);
+                self.write_r8(bus, 3, result);
+                8
+            }
             0x87 => {
                 // RES 0, A
                 self.a &= !0x01;
                 8
             }
-            _ => panic!("unimplemented CB opcode {:#04x}", cb_opcode),
+            _ => panic!("unimplemented CB opcode {:#04x} at {:#06x}", cb_opcode, pc),
         }
     }
 
@@ -1096,6 +1108,38 @@ mod tests {
             !cpu.get_carry_flag(),
             "0x10 > 0x01 overall, so no full borrow: C clear"
         );
+    }
+
+    // CB 0x23 SLA E -- shift left, bit 7 -> carry, 0 -> bit 0
+
+    #[test]
+    fn sla_e_shifts_bit7_into_carry() {
+        // 0x81 = 1000_0001 -> 0000_0010 = 0x02, old bit 7 (1) lands in carry
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x23]); // SLA E
+        cpu.e = 0x81;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SLA r should take 8 cycles");
+        assert_eq!(cpu.e, 0x02, "0x81 << 1 = 0x02, top bit dropped");
+        assert!(cpu.get_carry_flag(), "old bit 7 (set) routes into carry");
+        assert!(!cpu.get_zero_flag(), "result 0x02 is nonzero: Z clear");
+        assert!(!cpu.get_subtract_flag(), "SLA clears N");
+        assert!(!cpu.get_half_carry_flag(), "SLA clears H");
+    }
+
+    #[test]
+    fn sla_e_clears_carry_when_bit7_clear() {
+        // 0x40 = 0100_0000 -> 1000_0000 = 0x80, old bit 7 (0) -> carry clear
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x23]); // SLA E
+        cpu.e = 0x40;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SLA r should take 8 cycles");
+        assert_eq!(cpu.e, 0x80, "0x40 << 1 = 0x80");
+        assert!(!cpu.get_carry_flag(), "old bit 7 (clear) -> carry clear");
+        assert!(!cpu.get_zero_flag(), "result 0x80 is nonzero: Z clear");
     }
 
     // Collapse probes
