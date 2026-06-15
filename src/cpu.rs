@@ -62,12 +62,11 @@ impl Cpu {
                 self.set_bc(nn);
                 12
             }
-            0x06 | 0x0E | 0x16 | 0x1E | 0x26 | 0x2E | 0x36 | 0x3E => {
-                // LD r, n -- immediate into register (or (HL) for dst 6)
-                let dst = (opcode >> 3) & 0x07;
-                let n = self.fetch_byte(bus);
-                self.write_r8(bus, dst, n);
-                if dst == 6 { 12 } else { 8 }
+            0x03 => {
+                // INC BC -- no flags
+                let bc = self.get_bc();
+                self.set_bc(bc.wrapping_add(1));
+                8
             }
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 // INC r
@@ -84,6 +83,34 @@ impl Cpu {
                 let result = self.dec_r8(value);
                 self.write_r8(bus, dst, result);
                 if dst == 6 { 12 } else { 4 }
+            }
+            0x06 | 0x0E | 0x16 | 0x1E | 0x26 | 0x2E | 0x36 | 0x3E => {
+                // LD r, n -- immediate into register (or (HL) for dst 6)
+                let dst = (opcode >> 3) & 0x07;
+                let n = self.fetch_byte(bus);
+                self.write_r8(bus, dst, n);
+                if dst == 6 { 12 } else { 8 }
+            }
+            0x09 | 0x19 | 0x29 | 0x39 => {
+                // ADD HL, rr
+                let index = (opcode >> 4) & 0x03;
+                let value = self.read_r16_arith(index);
+                self.add_hl_r16(value);
+                8
+            }
+            0x10 => {
+                // STOP -- 2-byte opcode (0x10 0x00); second byte consumed and ignored.
+                // Real hardware halts CPU+LCD until a button interrupt (or does the
+                // CGB speed switch). With no interrupts/PPU yet, consume the pad byte
+                // and continue; revisit when those exist.
+                let _ = self.fetch_byte(bus); // consume the 0x00 pad byte
+                4
+            }
+            0x0A => {
+                // LD A, (BC) -- load A from the address in BC
+                let addr = self.get_bc();
+                self.a = bus.read_byte(addr);
+                8
             }
             0x0B => {
                 // DEC BC
@@ -125,15 +152,10 @@ impl Cpu {
                 // JR e -- unconditional relative jump
                 self.jr_conditional(bus, true)
             }
-            0x19 => {
-                // ADD HL, DE
-                let hl = self.get_hl();
-                let de = self.get_de();
-                self.set_hl(hl.wrapping_add(de));
-                // Z is preserved -- ADD HL, rr never touches it
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag((hl & 0x0FFF) + (de & 0x0FFF) > 0x0FFF);
-                self.set_carry_flag(hl as u32 + de as u32 > 0xFFFF);
+            0x1A => {
+                // LD A, (DE) -- load A from the address in DE
+                let addr = self.get_de();
+                self.a = bus.read_byte(addr);
                 8
             }
             0x1B => {
@@ -193,6 +215,13 @@ impl Cpu {
                 let src = opcode & 0x07;
                 let value = self.read_r8(bus, src);
                 self.alu_add(value);
+                if src == 6 { 8 } else { 4 }
+            }
+            0x90..=0x97 => {
+                // SUB r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_sub(value);
                 if src == 6 { 8 } else { 4 }
             }
             0xA0..=0xA7 => {
@@ -282,6 +311,12 @@ impl Cpu {
                 self.push_word(bus, self.pc);
                 self.pc = target;
                 24
+            }
+            0xD6 => {
+                // SUB n
+                let n = self.fetch_byte(bus);
+                self.alu_sub(n);
+                8
             }
             0xE0 => {
                 // LDH (n), A - store from A to the high page
@@ -496,6 +531,27 @@ impl Cpu {
         }
     }
 
+    fn read_r16_arith(&self, index: u8) -> u16 {
+        // Arithmetic pair table: BC DE HL SP
+        // Used by ADD HL,rr / INC,DEC rr / LD rr,nn
+        match index {
+            0 => self.get_bc(),
+            1 => self.get_de(),
+            2 => self.get_hl(),
+            3 => self.sp,
+            _ => panic!("invalid r16 arith index: {}", index),
+        }
+    }
+
+    fn add_hl_r16(&mut self, value: u16) {
+        let hl = self.get_hl();
+        self.set_hl(hl.wrapping_add(value));
+        // Z preserved -- ADD HL,rr never touches it
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag((hl & 0x0FFF) + (value & 0x0FFF) > 0x0FFF);
+        self.set_carry_flag(hl as u32 + value as u32 > 0xFFFF);
+    }
+
     fn condition(&self, opcode: u8) -> bool {
         match (opcode >> 3) & 0x03 {
             0 => !self.get_zero_flag(),  // NZ
@@ -567,6 +623,16 @@ impl Cpu {
         self.set_subtract_flag(false);
         self.set_half_carry_flag((a & 0x0F) + (value & 0x0F) > 0x0F);
         self.set_carry_flag(carry);
+        self.a = result;
+    }
+
+    fn alu_sub(&mut self, value: u8) {
+        let a = self.a;
+        let result = a.wrapping_sub(value);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(true);
+        self.set_half_carry_flag((a & 0x0F) < (value & 0x0F));
+        self.set_carry_flag(a < value);
         self.a = result;
     }
 
@@ -769,6 +835,35 @@ mod tests {
             cpu.get_carry_flag(),
             "DEC must preserve carry -- not clear it"
         );
+    }
+
+    // 0x09..=0x39 ADD HL, rr -- adds a pair to HL. Slot 3 is SP (arith table,
+    // not AF). Z preserved; H from bit 11; C from bit 15.
+    #[test]
+    fn add_hl_sp_uses_sp_slot_and_preserves_z() {
+        // 0x39 = ADD HL, SP -- index 3 of the arith table must read SP, not AF.
+        // HL=0x1000 + SP=0x0234 = 0x1234. No carries; Z pre-set stays set.
+        let (mut cpu, mut bus) = setup(&[0x39]); // ADD HL, SP
+        cpu.set_hl(0x1000);
+        cpu.sp = 0x0234;
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADD HL, rr should take 8 cycles");
+        assert_eq!(
+            cpu.get_hl(),
+            0x1234,
+            "HL + SP lands in HL -- slot 3 read SP"
+        );
+        assert_eq!(
+            cpu.sp, 0x0234,
+            "SP itself is unchanged -- it was the operand, not the target"
+        );
+        assert!(cpu.get_zero_flag(), "Z preserved across ADD HL, rr");
+        assert!(!cpu.get_subtract_flag(), "ADD HL, rr clears N");
+        assert!(!cpu.get_half_carry_flag(), "no bit-11 carry: H clear");
+        assert!(!cpu.get_carry_flag(), "no bit-15 carry: C clear");
     }
 
     // 0x0C INC C
@@ -1030,6 +1125,56 @@ mod tests {
 
         assert_eq!(cycles, 8, "LD B, (HL) should take 8 cycles");
         assert_eq!(cpu.b, 0x42, "the byte at (HL) lands in B");
+    }
+
+    // 0x90..=0x97 SUB r / 0xD6 SUB n -- subtract from A, KEEP result (CP discards it)
+
+    #[test]
+    fn sub_n_borrows_and_stores_result() {
+        // A=0x10 SUB 0x01 = 0x0F. Low nibble 0x0 < 0x1 borrows -> H set.
+        // 0x10 >= 0x01 overall -> no full borrow, C clear. Result lands in A.
+        let (mut cpu, mut bus) = setup(&[0xD6, 0x01]); // SUB 0x01
+        cpu.a = 0x10;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SUB n should take 8 cycles");
+        assert_eq!(
+            cpu.a, 0x0F,
+            "result stored in A -- this is what SUB does and CP doesn't"
+        );
+        assert!(!cpu.get_zero_flag(), "0x0F nonzero: Z clear");
+        assert!(cpu.get_subtract_flag(), "SUB sets N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "low nibble 0x0 < 0x1: borrow, H set"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "0x10 >= 0x01: no full borrow, C clear"
+        );
+    }
+
+    #[test]
+    fn sub_n_equal_operands_zero_result() {
+        // A=0x05 SUB 0x05 = 0x00. Equal values: no borrow anywhere, Z set.
+        let (mut cpu, mut bus) = setup(&[0xD6, 0x05]); // SUB 0x05
+        cpu.a = 0x05;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SUB n should take 8 cycles");
+        assert_eq!(cpu.a, 0x00, "0x05 - 0x05 = 0x00, stored in A");
+        assert!(cpu.get_zero_flag(), "equal operands: result zero, Z set");
+        assert!(cpu.get_subtract_flag(), "SUB sets N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "equal low nibbles: no borrow, H clear"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "equal values: no full borrow, C clear"
+        );
     }
 
     // 0xAF XOR A
