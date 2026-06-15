@@ -121,6 +121,10 @@ impl Cpu {
                 self.set_carry_flag(new_carry);
                 4
             }
+            0x18 => {
+                // JR e -- unconditional relative jump
+                self.jr_conditional(bus, true)
+            }
             0x19 => {
                 // ADD HL, DE
                 let hl = self.get_hl();
@@ -140,13 +144,7 @@ impl Cpu {
             }
             0x20 | 0x28 | 0x30 | 0x38 => {
                 // JR cc, e -- conditional relative jump (cc = NZ/Z/NC/C)
-                let condition = match (opcode >> 3) & 0x03 {
-                    0 => !self.get_zero_flag(),  // NZ
-                    1 => self.get_zero_flag(),   // Z
-                    2 => !self.get_carry_flag(), // NC
-                    3 => self.get_carry_flag(),  // C
-                    _ => unreachable!(),         // 2-bit mask can't exceed 3
-                };
+                let condition = self.condition(opcode);
                 self.jr_conditional(bus, condition)
             }
             0x21 => {
@@ -225,6 +223,15 @@ impl Cpu {
                 self.alu_cp(value);
                 if src == 6 { 8 } else { 4 }
             }
+            0xC0 | 0xC8 | 0xD0 | 0xD8 => {
+                // RET cc -- conditional return (20 taken / 8 not -- taken exceeds plain RET's 16)
+                if self.condition(opcode) {
+                    self.pc = self.pop_word(bus);
+                    20
+                } else {
+                    8
+                }
+            }
             0xC1 | 0xD1 | 0xE1 | 0xF1 => {
                 // POP rr
                 let index = (opcode >> 4) & 0x03;
@@ -234,13 +241,7 @@ impl Cpu {
             }
             0xC2 | 0xCA | 0xD2 | 0xDA => {
                 // JP cc, nn -- conditional absolute jump (cc = NZ/Z/NC/C)
-                let condition = match (opcode >> 3) & 0x03 {
-                    0 => !self.get_zero_flag(),
-                    1 => self.get_zero_flag(),
-                    2 => !self.get_carry_flag(),
-                    3 => self.get_carry_flag(),
-                    _ => unreachable!(),
-                };
+                let condition = self.condition(opcode);
                 self.jp_conditional(bus, condition)
             }
             0xC3 => {
@@ -255,6 +256,12 @@ impl Cpu {
                 let value = self.read_r16_stack(index);
                 self.push_word(bus, value);
                 16
+            }
+            0xC6 => {
+                // ADD A, n
+                let n = self.fetch_byte(bus);
+                self.alu_add(n);
+                8
             }
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
                 // RST -- single-byte call to fixed vector (ttt * 8)
@@ -486,6 +493,16 @@ impl Cpu {
             2 => self.set_hl(value),
             3 => self.set_af(value),
             _ => panic!("invalid r16 stack index: {}", index),
+        }
+    }
+
+    fn condition(&self, opcode: u8) -> bool {
+        match (opcode >> 3) & 0x03 {
+            0 => !self.get_zero_flag(),  // NZ
+            1 => self.get_zero_flag(),   // Z
+            2 => !self.get_carry_flag(), // NC
+            3 => self.get_carry_flag(),  // C
+            _ => unreachable!(),
         }
     }
 
@@ -1480,6 +1497,47 @@ mod tests {
         assert!(
             cpu.get_carry_flag(),
             "0xFF + 0x01 overflows the byte: C set"
+        );
+    }
+
+    // 0xC0..=0xD8 RET cc -- conditional return; 20 taken / 8 not (the unusual costs)
+
+    #[test]
+    fn ret_z_taken_when_zero_set() {
+        // Z set -> pop return address into pc, unwind sp. Plant the address
+        // manually since no CALL precedes it here.
+        let (mut cpu, mut bus) = setup(&[0xC8]); // RET Z
+        cpu.sp = 0xC100;
+        bus.write_word(0xC100, 0xBEEF); // return address on the stack
+        cpu.set_zero_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(
+            cycles, 20,
+            "taken conditional RET costs 20 -- more than plain RET's 16"
+        );
+        assert_eq!(cpu.pc, 0xBEEF, "Z set: return address popped into pc");
+        assert_eq!(cpu.sp, 0xC102, "sp unwinds by 2 after the pop");
+    }
+
+    #[test]
+    fn ret_z_not_taken_falls_through() {
+        // Z clear -> no pop, no jump. pc advances past the 1-byte opcode only,
+        // sp untouched. This is the path where a wrong cycle count or a stray
+        // pop would corrupt the stack.
+        let (mut cpu, mut bus) = setup(&[0xC8]); // RET Z
+        cpu.sp = 0xC100;
+        bus.write_word(0xC100, 0xBEEF);
+        cpu.set_zero_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "not-taken conditional RET costs 8");
+        assert_eq!(cpu.pc, 0xC001, "not taken: pc past the opcode, no return");
+        assert_eq!(
+            cpu.sp, 0xC100,
+            "sp untouched -- no pop on the not-taken path"
         );
     }
 }
