@@ -62,10 +62,11 @@ impl Cpu {
                 self.set_bc(nn);
                 12
             }
-            0x06 => {
-                // LD B, n
-                self.b = self.fetch_byte(bus);
-                8
+            0x06 | 0x0E | 0x16 | 0x1E | 0x26 | 0x2E | 0x36 | 0x3E => {
+                let dst = (opcode >> 3) & 0x07;
+                let n = self.fetch_byte(bus);
+                self.write_r8(bus, dst, n);
+                if dst == 6 { 12 } else { 8 }
             }
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
                 let dst = (opcode >> 3) & 0x07;
@@ -86,11 +87,6 @@ impl Cpu {
                 // Decrement the BC register pair -- no flags
                 let bc = self.get_bc();
                 self.set_bc(bc.wrapping_sub(1));
-                8
-            }
-            0x0E => {
-                // LD C, n - load an immediate byte into C
-                self.c = self.fetch_byte(bus);
                 8
             }
             0x11 => {
@@ -161,18 +157,6 @@ impl Cpu {
             0x31 => {
                 // LD SP, nn - load a 16-bit immediate into the stack pointer
                 self.sp = self.fetch_word(bus);
-                12
-            }
-            0x3E => {
-                // LD A, n - load an immediate byte into A
-                self.a = self.fetch_byte(bus);
-                8
-            }
-            0x36 => {
-                // LD (HL), n
-                let n = self.fetch_byte(bus);
-                let addr = self.get_hl();
-                bus.write_byte(addr, n);
                 12
             }
             0x76 => panic!("HALT not yet implemented"), // must precede 0x40..=0x7F
@@ -844,6 +828,22 @@ mod tests {
         );
         assert_eq!(cpu.h, 0xC1, "carry must propagate into h");
         assert_eq!(cpu.l, 0x00, "l wraps to zero");
+    }
+
+    // 0x36 LD (HL), n -- the memory-destination member of the collapsed LD r,n row
+    #[test]
+    fn ld_hl_mem_n_writes_memory_and_costs_12() {
+        let (mut cpu, mut bus) = setup(&[0x36, 0x42]); // LD (HL), 0x42
+        cpu.set_hl(0xC050);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "LD (HL), n writes memory: 12 cycles, not 8");
+        assert_eq!(
+            bus.read_byte(0xC050),
+            0x42,
+            "the immediate byte lands in memory at HL"
+        );
     }
 
     // 0x38 JR C, e
