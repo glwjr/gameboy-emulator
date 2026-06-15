@@ -63,23 +63,26 @@ impl Cpu {
                 12
             }
             0x06 | 0x0E | 0x16 | 0x1E | 0x26 | 0x2E | 0x36 | 0x3E => {
+                // LD r, n -- immediate into register (or (HL) for dst 6)
                 let dst = (opcode >> 3) & 0x07;
                 let n = self.fetch_byte(bus);
                 self.write_r8(bus, dst, n);
                 if dst == 6 { 12 } else { 8 }
             }
             0x04 | 0x0C | 0x14 | 0x1C | 0x24 | 0x2C | 0x34 | 0x3C => {
+                // INC r
                 let dst = (opcode >> 3) & 0x07;
-                let v = self.read_r8(bus, dst);
-                let r = self.inc_r8(v);
-                self.write_r8(bus, dst, r);
+                let value = self.read_r8(bus, dst);
+                let result = self.inc_r8(value);
+                self.write_r8(bus, dst, result);
                 if dst == 6 { 12 } else { 4 }
             }
             0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D => {
+                // DEC r
                 let dst = (opcode >> 3) & 0x07;
-                let v = self.read_r8(bus, dst);
-                let r = self.dec_r8(v);
-                self.write_r8(bus, dst, r);
+                let value = self.read_r8(bus, dst);
+                let result = self.dec_r8(value);
+                self.write_r8(bus, dst, result);
                 if dst == 6 { 12 } else { 4 }
             }
             0x0B => {
@@ -125,6 +128,7 @@ impl Cpu {
                 8
             }
             0x20 | 0x28 | 0x30 | 0x38 => {
+                // JR cc, e -- conditional relative jump (cc = NZ/Z/NC/C)
                 let condition = match (opcode >> 3) & 0x03 {
                     0 => !self.get_zero_flag(),  // NZ
                     1 => self.get_zero_flag(),   // Z
@@ -147,6 +151,12 @@ impl Cpu {
                 self.set_hl(addr.wrapping_add(1));
                 8
             }
+            0x23 => {
+                // INC HL -- no flags
+                let hl = self.get_hl();
+                self.set_hl(hl.wrapping_add(1));
+                8
+            }
             0x2A => {
                 // LD A, (HL+) - read from memory at HL into A, then increment HL
                 let addr = self.get_hl();
@@ -161,6 +171,7 @@ impl Cpu {
             }
             0x76 => panic!("HALT not yet implemented"), // must precede 0x40..=0x7F
             0x40..=0x7F => {
+                // LD r, r' -- register-to-register (0x76 HALT carved out above)
                 let dst = (opcode >> 3) & 0x07;
                 let src = opcode & 0x07;
                 let value = self.read_r8(bus, src);
@@ -169,30 +180,42 @@ impl Cpu {
                 if dst == 6 || src == 6 { 8 } else { 4 }
             }
             0xA0..=0xA7 => {
-                let s = opcode & 0x07;
-                let v = self.read_r8(bus, s);
-                self.alu_and(v);
-                if s == 6 { 8 } else { 4 }
-            }
-            0xA8..=0xAF => {
-                let s = opcode & 0x07;
-                let v = self.read_r8(bus, s);
-                self.alu_xor(v);
-                if s == 6 { 8 } else { 4 }
-            }
-            0xB0..=0xB7 => {
-                let s = opcode & 0x07;
-                let v = self.read_r8(bus, s);
-                self.alu_or(v);
-                if s == 6 { 8 } else { 4 }
-            }
-            0xB8..=0xBF => {
+                // AND r
                 let src = opcode & 0x07;
-                let v = self.read_r8(bus, src);
-                self.alu_cp(v);
+                let value = self.read_r8(bus, src);
+                self.alu_and(value);
                 if src == 6 { 8 } else { 4 }
             }
+            0xA8..=0xAF => {
+                // XOR r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_xor(value);
+                if src == 6 { 8 } else { 4 }
+            }
+            0xB0..=0xB7 => {
+                // OR r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_or(value);
+                if src == 6 { 8 } else { 4 }
+            }
+            0xB8..=0xBF => {
+                // CP r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_cp(value);
+                if src == 6 { 8 } else { 4 }
+            }
+            0xC1 | 0xD1 | 0xE1 | 0xF1 => {
+                // POP rr
+                let index = (opcode >> 4) & 0x03;
+                let value = self.pop_word(bus);
+                self.write_r16_stack(index, value);
+                12
+            }
             0xC2 | 0xCA | 0xD2 | 0xDA => {
+                // JP cc, nn -- conditional absolute jump (cc = NZ/Z/NC/C)
                 let condition = match (opcode >> 3) & 0x03 {
                     0 => !self.get_zero_flag(),
                     1 => self.get_zero_flag(),
@@ -208,7 +231,15 @@ impl Cpu {
                 self.pc = addr;
                 16
             }
+            0xC5 | 0xD5 | 0xE5 | 0xF5 => {
+                // PUSH rr
+                let index = (opcode >> 4) & 0x03;
+                let value = self.read_r16_stack(index);
+                self.push_word(bus, value);
+                16
+            }
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
+                // RST -- single-byte call to fixed vector (ttt * 8)
                 let target = ((opcode >> 3) & 0x07) as u16 * 8;
                 self.push_word(bus, self.pc);
                 self.pc = target;
@@ -234,23 +265,11 @@ impl Cpu {
                 bus.write_byte(addr, self.a);
                 12
             }
-            0xE1 => {
-                // POP HL
-                let value = self.pop_word(bus);
-                self.set_hl(value);
-                12
-            }
             0xE2 => {
                 // LD (C), A - store A at 0xFF00 plus C
                 let addr = 0xFF00 | (self.c as u16);
                 bus.write_byte(addr, self.a);
                 8
-            }
-            0xE5 => {
-                // PUSH HL
-                let value = self.get_hl();
-                self.push_word(bus, value);
-                16
             }
             0xE6 => {
                 // AND n
@@ -293,6 +312,19 @@ impl Cpu {
     fn step_cb(&mut self, bus: &mut Bus, pc: u16) -> u8 {
         let cb_opcode = self.fetch_byte(bus);
         match cb_opcode {
+            0x12 => {
+                // RL D -- rotate D left through carry: old C -> bit 0, bit 7 -> new C
+                let value = self.read_r8(bus, 2); // D
+                let old_carry = self.get_carry_flag();
+                let new_carry = (value & 0x80) != 0;
+                let result = (value << 1) | (old_carry as u8);
+                self.set_zero_flag(result == 0);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(new_carry);
+                self.write_r8(bus, 2, result);
+                8
+            }
             0x23 => {
                 // SLA E -- shift E left arithmetically
                 let value = self.read_r8(bus, 3); // E
@@ -409,6 +441,29 @@ impl Cpu {
         self.set_half_carry_flag((value & 0x0F) == 0x00);
         // Carry is preserved -- DEC never touches it
         result
+    }
+
+    fn read_r16_stack(&self, index: u8) -> u16 {
+        // Stack pair table: BC DE HL AF (slot 3 is AF, not SP -- PUSH/POP only)
+        match index {
+            0 => self.get_bc(),
+            1 => self.get_de(),
+            2 => self.get_hl(),
+            3 => self.get_af(),
+            _ => panic!("invalid r16 stack index: {}", index),
+        }
+    }
+
+    fn write_r16_stack(&mut self, index: u8, value: u16) {
+        // Stack pair table: BC DE HL AF. Slot 3 routes through set_af, which
+        // masks F's low nibble to zero -- a raw f write would corrupt flags
+        match index {
+            0 => self.set_bc(value),
+            1 => self.set_de(value),
+            2 => self.set_hl(value),
+            3 => self.set_af(value),
+            _ => panic!("invalid r16 stack index: {}", index),
+        }
     }
 
     fn jr_conditional(&mut self, bus: &mut Bus, condition: bool) -> u8 {
@@ -843,6 +898,7 @@ mod tests {
     }
 
     // 0x36 LD (HL), n -- the memory-destination member of the collapsed LD r,n row
+
     #[test]
     fn ld_hl_mem_n_writes_memory_and_costs_12() {
         let (mut cpu, mut bus) = setup(&[0x36, 0x42]); // LD (HL), 0x42
@@ -1140,6 +1196,72 @@ mod tests {
         assert_eq!(cpu.e, 0x80, "0x40 << 1 = 0x80");
         assert!(!cpu.get_carry_flag(), "old bit 7 (clear) -> carry clear");
         assert!(!cpu.get_zero_flag(), "result 0x80 is nonzero: Z clear");
+    }
+
+    // CB 0x12 RL D -- rotate left through carry (distinct from SLA: bit 0 = old carry)
+
+    #[test]
+    fn rl_d_feeds_old_carry_into_bit0() {
+        // D = 0x00, carry SET. A shift would give 0x00; a rotate-through-carry
+        // pulls the old carry into bit 0 -> 0x01
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x12]); // RL D
+        cpu.d = 0x00;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "RL r should take 8 cycles");
+        assert_eq!(
+            cpu.d, 0x01,
+            "old carry feeds into bit 0 -- not a plain shift"
+        );
+        assert!(!cpu.get_carry_flag(), "bit 7 was clear: new carry clear");
+        assert!(!cpu.get_zero_flag(), "result 0x01 is nonzero: Z clear");
+        assert!(!cpu.get_subtract_flag(), "RL clears N");
+        assert!(!cpu.get_half_carry_flag(), "RL clears H");
+    }
+
+    #[test]
+    fn rl_d_captures_bit7_into_carry_and_zeroes() {
+        // D = 0x80, carry CLEAR. bit 7 (1) -> new carry; old carry (0) -> bit 0
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x12]); // RL D
+        cpu.d = 0x80;
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "RL r should take 8 cycles");
+        assert_eq!(
+            cpu.d, 0x00,
+            "0x80 << 1 drops the top bit, old carry 0 fills bit 0"
+        );
+        assert!(
+            cpu.get_carry_flag(),
+            "old bit 7 (set) becomes the new carry"
+        );
+        assert!(cpu.get_zero_flag(), "result is zero: Z set");
+    }
+
+    // CB/stack: POP AF must mask F's low nibble
+
+    #[test]
+    fn pop_af_masks_low_nibble_of_f() {
+        // Stack a value whose low nibble is nonzero: 0x123F. F's low 4 bits
+        // must come out zero, because the real F register only uses bits 4-7.
+        let (mut cpu, mut bus) = setup(&[0xF1]); // POP AF
+        cpu.sp = 0xC100;
+        bus.write_word(0xC100, 0x123F); // A=0x12, F=0x3F (low nibble 0xF must clear)
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "POP rr should take 12 cycles");
+        assert_eq!(cpu.a, 0x12, "high byte pops into A");
+        assert_eq!(
+            cpu.get_af() & 0x00FF,
+            0x30,
+            "F low nibble masked off: 0x3F -> 0x30"
+        );
+        assert_eq!(cpu.sp, 0xC102, "POP unwinds sp by 2");
     }
 
     // Collapse probes
