@@ -45,12 +45,11 @@ impl Cpu {
 
     pub fn handle_interrupts(&mut self, bus: &mut Bus) -> u8 {
         let pending = bus.read_byte(0xFF0F) & bus.read_byte(0xFFFF);
+
         if pending != 0 {
             self.halted = false; // a pending interrupt wakes HALT, even if IME is off
         }
-        if !self.ime {
-            return 0;
-        }
+
         if !self.ime {
             return 0; // master switch off: nothing to service
         }
@@ -135,14 +134,6 @@ impl Cpu {
                 self.add_hl_r16(value);
                 8
             }
-            0x10 => {
-                // STOP -- 2-byte opcode (0x10 0x00); second byte consumed and ignored.
-                // Real hardware halts CPU+LCD until a button interrupt (or does the
-                // CGB speed switch). With no interrupts/PPU yet, consume the pad byte
-                // and continue; revisit when those exist.
-                let _ = self.fetch_byte(bus); // consume the 0x00 pad byte
-                4
-            }
             0x0A => {
                 // LD A, (BC) -- load A from the address in BC
                 let addr = self.get_bc();
@@ -155,6 +146,14 @@ impl Cpu {
                 let bc = self.get_bc();
                 self.set_bc(bc.wrapping_sub(1));
                 8
+            }
+            0x10 => {
+                // STOP -- 2-byte opcode (0x10 0x00); second byte consumed and ignored.
+                // Real hardware halts CPU+LCD until a button interrupt (or does the
+                // CGB speed switch). With no interrupts/PPU yet, consume the pad byte
+                // and continue; revisit when those exist.
+                let _ = self.fetch_byte(bus); // consume the 0x00 pad byte
+                4
             }
             0x11 => {
                 // LD DE, nn
@@ -201,6 +200,18 @@ impl Cpu {
                 self.set_de(de.wrapping_sub(1));
                 8
             }
+            0x1F => {
+                // RRA -- rotate A right through carry. Bit 0 -> carry, old carry -> bit 7.
+                // Z always cleared.
+                let old_carry = self.get_carry_flag();
+                let new_carry = (self.a & 0x01) != 0; // bit 0 falls into carry
+                self.a = (self.a >> 1) | ((old_carry as u8) << 7); // old carry fills bit 7
+                self.set_zero_flag(false); // accumulator rotates always clear Z
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                self.set_carry_flag(new_carry);
+                4
+            }
             0x20 | 0x28 | 0x30 | 0x38 => {
                 // JR cc, e -- conditional relative jump (cc = NZ/Z/NC/C)
                 let condition = self.condition(opcode);
@@ -232,10 +243,31 @@ impl Cpu {
                 self.set_hl(addr.wrapping_add(1));
                 8
             }
+            0x2B => {
+                // DEC HL -- no flags
+                let hl = self.get_hl();
+                self.set_hl(hl.wrapping_sub(1));
+                8
+            }
+            0x2F => {
+                // CPL -- complement A (flip all bits). N and H set; Z and C preserved.
+                self.a = !self.a;
+                self.set_subtract_flag(true);
+                self.set_half_carry_flag(true);
+                // Z and C preserved -- CPL doesn't touch them
+                4
+            }
             0x31 => {
                 // LD SP, nn - load a 16-bit immediate into the stack pointer
                 self.sp = self.fetch_word(bus);
                 12
+            }
+            0x32 => {
+                // LD (HL-), A -- store A at address HL, then decrement HL
+                let addr = self.get_hl();
+                bus.write_byte(addr, self.a);
+                self.set_hl(addr.wrapping_sub(1));
+                8
             }
             0x76 => {
                 // HALT -- suspend CPU until an interrupt is pending
@@ -359,6 +391,13 @@ impl Cpu {
                 self.alu_sub(n);
                 8
             }
+            0xD9 => {
+                // RETI -- return from interrupt: pop pc AND re-enable interrupts.
+                // The IME restore is what makes the next interrupt able to fire.
+                self.pc = self.pop_word(bus);
+                self.ime = true;
+                16
+            }
             0xE0 => {
                 // LDH (n), A - store from A to the high page
                 let n = self.fetch_byte(bus);
@@ -397,6 +436,12 @@ impl Cpu {
                 self.a = bus.read_byte(addr);
                 12
             }
+            0xF3 => {
+                // DI -- disable interrupts. Clears IME immediately.
+                // Game uses this to guard critical sections.
+                self.ime = false;
+                4
+            }
             0xFA => {
                 // LD A, (nn)
                 // Fetch a 16-bit immediate address and load
@@ -427,8 +472,8 @@ impl Cpu {
         let index = cb & 0x07; // low 3 bits: register B C D E H L (HL) A
         let bit = (cb >> 3) & 0x07; // middle 3 bits: rotate-select OR bit number
 
-        // (HL) operations cost 16 cycles (read-modify-write memory); register
-        // ops cost 8. BIT (HL) is the exception at 12 (read only, no write-back).
+        // (HL) ops cost 16 (read-modify-write); registers 8. BIT (HL) is the
+        // exception at 12 (reads only, no write-back).
         match cb >> 6 {
             // 0b00: rotates and shifts, sub-selected by `bit`
             0 => {
@@ -447,22 +492,22 @@ impl Cpu {
                 self.write_r8(bus, index, result);
                 if index == 6 { 16 } else { 8 }
             }
-            // 0b01: BIT b, r -- test bit `bit` of the operand, set Z to its complement
+            // 0b01: BIT b, r -- test bit; set Z to its complement, no write-back
             1 => {
                 let value = self.read_r8(bus, index);
                 self.set_zero_flag(value & (1 << bit) == 0);
                 self.set_subtract_flag(false);
                 self.set_half_carry_flag(true);
-                // carry preserved; BIT never writes back
+                // carry preserved
                 if index == 6 { 12 } else { 8 }
             }
-            // 0b10: RES b, r -- clear bit `bit`
+            // 0b10: RES b, r -- clear bit
             2 => {
                 let value = self.read_r8(bus, index);
                 self.write_r8(bus, index, value & !(1 << bit));
                 if index == 6 { 16 } else { 8 }
             }
-            // 0b11: SET b, r -- set bit `bit`
+            // 0b11: SET b, r -- set bit
             3 => {
                 let value = self.read_r8(bus, index);
                 self.write_r8(bus, index, value | (1 << bit));
@@ -472,11 +517,11 @@ impl Cpu {
         }
     }
 
-    // CB rotate/shift operations: take a byte, return the result, set flags.
-    // All set Z from result, clear N and H, and route the shifted-out bit to C.
+    // --- CB rotate/shift ops: take a byte, return result, set flags ---
+    // All set Z from result, clear N and H, route the shifted-out bit to C.
 
     fn rlc(&mut self, value: u8) -> u8 {
-        // Rotate left: bit 7 -> carry AND -> bit 0 (circular, no carry-in)
+        // Rotate left circular: bit 7 -> carry AND -> bit 0
         let carry = (value & 0x80) != 0;
         let result = value.rotate_left(1);
         self.set_rotate_flags(result, carry);
@@ -484,7 +529,7 @@ impl Cpu {
     }
 
     fn rrc(&mut self, value: u8) -> u8 {
-        // Rotate right: bit 0 -> carry AND -> bit 7 (circular)
+        // Rotate right circular: bit 0 -> carry AND -> bit 7
         let carry = (value & 0x01) != 0;
         let result = value.rotate_right(1);
         self.set_rotate_flags(result, carry);
@@ -520,7 +565,7 @@ impl Cpu {
     fn sra(&mut self, value: u8) -> u8 {
         // Shift right arithmetic: bit 0 -> carry, bit 7 PRESERVED (sign-extending)
         let carry = (value & 0x01) != 0;
-        let result = (value >> 1) | (value & 0x80); // keep the top bit
+        let result = (value >> 1) | (value & 0x80);
         self.set_rotate_flags(result, carry);
         result
     }
@@ -544,7 +589,7 @@ impl Cpu {
     }
 
     fn set_rotate_flags(&mut self, result: u8, carry: bool) {
-        // Shared flag pattern for rotates/shifts (not SWAP, which clears C):
+        // Shared flag pattern for rotates/shifts (SWAP opts out -- it clears C):
         // Z from result, N and H cleared, C = the shifted-out bit.
         self.set_zero_flag(result == 0);
         self.set_subtract_flag(false);
@@ -980,6 +1025,7 @@ mod tests {
 
     // 0x09..=0x39 ADD HL, rr -- adds a pair to HL. Slot 3 is SP (arith table,
     // not AF). Z preserved; H from bit 11; C from bit 15.
+
     #[test]
     fn add_hl_sp_uses_sp_slot_and_preserves_z() {
         // 0x39 = ADD HL, SP -- index 3 of the arith table must read SP, not AF.
@@ -1147,6 +1193,27 @@ mod tests {
         assert!(cpu.get_carry_flag(), "bit-15 carry: C sets");
     }
 
+    // 0x1F RRA
+
+    #[test]
+    fn rra_routes_bit0_to_carry_and_clears_z() {
+        let (mut cpu, mut bus) = setup(&[0x1F]); // RRA
+        cpu.a = 0x01;
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "RRA should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "0x01 >> 1 = 0x00, old carry 0 fills bit 7");
+        assert!(cpu.get_carry_flag(), "bit 0 (set) routes into carry");
+        assert!(
+            !cpu.get_zero_flag(),
+            "RRA ALWAYS clears Z -- even on zero result"
+        );
+        assert!(!cpu.get_subtract_flag(), "RRA clears N");
+        assert!(!cpu.get_half_carry_flag(), "RRA clears H");
+    }
+
     // 0x20 JR NZ, e
 
     #[test]
@@ -1239,6 +1306,24 @@ mod tests {
             0x42,
             "the immediate byte lands in memory at HL"
         );
+    }
+
+    // 0x37 SWAP A
+
+    #[test]
+    fn swap_a_exchanges_nibbles_and_clears_flags() {
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x37]); // SWAP A
+        cpu.a = 0xAB;
+        cpu.set_carry_flag(true); // pre-set: SWAP clears C
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SWAP r should take 8 cycles");
+        assert_eq!(cpu.a, 0xBA, "0xAB nibbles swapped -> 0xBA");
+        assert!(!cpu.get_zero_flag(), "nonzero result: Z clear");
+        assert!(!cpu.get_subtract_flag(), "SWAP clears N");
+        assert!(!cpu.get_half_carry_flag(), "SWAP clears H");
+        assert!(!cpu.get_carry_flag(), "SWAP clears C -- was pre-set true");
     }
 
     // 0x38 JR C, e
@@ -1827,12 +1912,11 @@ mod tests {
         );
     }
 
-    // CB table collapse
+    // --- CB table collapse validation ---
 
     #[test]
     fn cb_sla_e_still_works_after_collapse() {
-        // 0x23 = SLA E (the hand-written op this collapse replaces). 0x81 -> 0x02, C set.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x23]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x23]); // SLA E
         cpu.e = 0x81;
         let cycles = cpu.step(&mut bus);
         assert_eq!(cycles, 8);
@@ -1842,8 +1926,7 @@ mod tests {
 
     #[test]
     fn cb_rl_d_still_works_after_collapse() {
-        // 0x12 = RL D. D=0x00 with carry set -> 0x01 (old carry into bit 0).
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x12]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x12]); // RL D
         cpu.d = 0x00;
         cpu.set_carry_flag(true);
         cpu.step(&mut bus);
@@ -1853,8 +1936,7 @@ mod tests {
 
     #[test]
     fn cb_swap_a() {
-        // 0x37 = SWAP A. 0xAB -> 0xBA, all flags but Z cleared.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x37]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x37]); // SWAP A
         cpu.a = 0xAB;
         cpu.set_carry_flag(true);
         cpu.step(&mut bus);
@@ -1864,49 +1946,43 @@ mod tests {
 
     #[test]
     fn cb_bit_tests_without_writing() {
-        // 0x40 = BIT 0, B. B=0x01 -> bit 0 set -> Z clear. B unchanged.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x40]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x40]); // BIT 0, B
         cpu.b = 0x01;
         let cycles = cpu.step(&mut bus);
         assert_eq!(cycles, 8);
-        assert!(!cpu.get_zero_flag(), "bit 0 of 0x01 is set: Z clear");
-        assert!(cpu.get_half_carry_flag(), "BIT always sets H");
-        assert_eq!(cpu.b, 0x01, "BIT must not modify the operand");
+        assert!(!cpu.get_zero_flag(), "bit 0 of 0x01 set: Z clear");
+        assert!(cpu.get_half_carry_flag(), "BIT sets H");
+        assert_eq!(cpu.b, 0x01, "BIT must not modify operand");
 
-        // 0x48 = BIT 1, B. B=0x01 -> bit 1 clear -> Z set.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x48]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x48]); // BIT 1, B
         cpu.b = 0x01;
         cpu.step(&mut bus);
-        assert!(cpu.get_zero_flag(), "bit 1 of 0x01 is clear: Z set");
+        assert!(cpu.get_zero_flag(), "bit 1 of 0x01 clear: Z set");
     }
 
     #[test]
     fn cb_res_and_set() {
-        // 0x80 = RES 0, B. B=0xFF -> clear bit 0 -> 0xFE.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x80]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x80]); // RES 0, B
         cpu.b = 0xFF;
         cpu.step(&mut bus);
         assert_eq!(cpu.b, 0xFE, "RES 0 clears bit 0");
 
-        // 0xC7 = SET 0, A. A=0x00 -> set bit 0 -> 0x01.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0xC7]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0xC7]); // SET 0, A
         cpu.a = 0x00;
         cpu.step(&mut bus);
         assert_eq!(cpu.a, 0x01, "SET 0 sets bit 0");
     }
 
     #[test]
-    fn cb_hl_memory_path_costs_more() {
-        // 0x36 = SWAP (HL): read-modify-write memory -> 16 cycles.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x36]);
+    fn cb_hl_memory_path_costs() {
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x36]); // SWAP (HL)
         cpu.set_hl(0xC050);
         bus.write_byte(0xC050, 0xAB);
         let cycles = cpu.step(&mut bus);
-        assert_eq!(cycles, 16, "SWAP (HL) is read-modify-write: 16 cycles");
+        assert_eq!(cycles, 16, "SWAP (HL) read-modify-write: 16 cycles");
         assert_eq!(bus.read_byte(0xC050), 0xBA, "nibbles swapped in memory");
 
-        // 0x46 = BIT 0, (HL): read-only -> 12 cycles (not 16).
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x46]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x46]); // BIT 0, (HL)
         cpu.set_hl(0xC050);
         bus.write_byte(0xC050, 0x01);
         let cycles = cpu.step(&mut bus);
@@ -1915,11 +1991,10 @@ mod tests {
 
     #[test]
     fn cb_sra_preserves_sign_bit() {
-        // 0x2F = SRA A. SRA keeps bit 7 (arithmetic). 0x80 -> 0xC0, bit 0 (0) -> carry clear.
-        let (mut cpu, mut bus) = setup(&[0xCB, 0x2F]);
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x2F]); // SRA A
         cpu.a = 0x80;
         cpu.step(&mut bus);
-        assert_eq!(cpu.a, 0xC0, "SRA preserves the sign bit: 0x80 -> 0xC0");
-        assert!(!cpu.get_carry_flag(), "bit 0 was clear: carry clear");
+        assert_eq!(cpu.a, 0xC0, "SRA preserves sign bit: 0x80 -> 0xC0");
+        assert!(!cpu.get_carry_flag(), "bit 0 clear: carry clear");
     }
 }
