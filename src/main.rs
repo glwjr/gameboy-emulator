@@ -20,8 +20,9 @@ impl GameBoy {
     }
 
     fn step(&mut self) {
+        let interrupt_cycles = self.cpu.handle_interrupts(&mut self.bus);
         let cycles = self.cpu.step(&mut self.bus);
-        self.bus.tick(cycles);
+        self.bus.tick(interrupt_cycles + cycles);
     }
 
     fn pc(&self) -> u16 {

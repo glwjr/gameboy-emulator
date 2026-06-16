@@ -43,7 +43,43 @@ impl Cpu {
 
     // Public API
 
+    pub fn handle_interrupts(&mut self, bus: &mut Bus) -> u8 {
+        let pending = bus.read_byte(0xFF0F) & bus.read_byte(0xFFFF);
+
+        if pending != 0 {
+            self.halted = false; // a pending interrupt wakes HALT, even if IME is off
+        }
+
+        if !self.ime {
+            return 0; // master switch off: nothing to service
+        }
+
+        let requested = bus.read_byte(0xFF0F); // IF
+        let enabled = bus.read_byte(0xFFFF); // IE
+        let pending = requested & enabled; // both set = serviceable
+
+        if pending == 0 {
+            return 0; // nothing pending+enabled
+        }
+
+        // VBlank = bit 0, vector 0x40. (Others added later)
+        if pending & 0x01 != 0 {
+            self.ime = false;
+            let new_if = requested & !0x01; // clear the VBlank request
+            bus.write_byte(0xFF0F, new_if);
+            self.push_word(bus, self.pc);
+            self.pc = 0x40;
+            return 20;
+        }
+
+        0
+    }
+
     pub fn step(&mut self, bus: &mut Bus) -> u8 {
+        if self.halted {
+            return 4; // halted: burn time until an interrupt wakes us
+        }
+
         // Trace must fire before the fetch: the Doctor format reports the
         // state at the instruction boundary (PC = this instruction's
         // address, PCMEM = its bytes). After the fetch, pc has advanced.
@@ -200,7 +236,11 @@ impl Cpu {
                 self.sp = self.fetch_word(bus);
                 12
             }
-            0x76 => panic!("HALT not yet implemented"), // must precede 0x40..=0x7F
+            0x76 => {
+                // HALT -- suspend CPU until an interrupt is pending
+                self.halted = true;
+                4
+            }
             0x40..=0x7F => {
                 // LD r, r' -- register-to-register (0x76 HALT carved out above)
                 let dst = (opcode >> 3) & 0x07;

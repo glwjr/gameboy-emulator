@@ -96,7 +96,12 @@ impl Bus {
 
             // Advance LY with the wrap
             let ly = self.io[0x44];
-            self.io[0x44] = if ly >= 153 { 0 } else { ly + 1 }
+            let new_ly = if ly >= 153 { 0 } else { ly + 1 };
+            self.io[0x44] = new_ly;
+
+            if new_ly == 144 {
+                self.io[0x0F] |= 0x01; // request VBlank interrupt (IF bit 0)
+            }
         }
     }
 }
