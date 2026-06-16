@@ -98,6 +98,12 @@ impl Cpu {
                 self.set_bc(nn);
                 12
             }
+            0x02 => {
+                // LD (BC), A -- store A at the address in BC
+                let addr = self.get_bc();
+                bus.write_byte(addr, self.a);
+                8
+            }
             0x03 => {
                 // INC BC -- no flags
                 let bc = self.get_bc();
@@ -126,6 +132,12 @@ impl Cpu {
                 let n = self.fetch_byte(bus);
                 self.write_r8(bus, dst, n);
                 if dst == 6 { 12 } else { 8 }
+            }
+            0x07 => {
+                // RLCA -- rotate A left circular
+                self.a = self.rlc(self.a);
+                self.set_zero_flag(false); // accumulator rotate: Z always clear
+                4
             }
             0x09 | 0x19 | 0x29 | 0x39 => {
                 // ADD HL, rr
@@ -269,6 +281,13 @@ impl Cpu {
                 self.set_hl(addr.wrapping_sub(1));
                 8
             }
+            0x3A => {
+                // LD A, (HL-) -- load A from address HL, then decrement HL
+                let addr = self.get_hl();
+                self.a = bus.read_byte(addr);
+                self.set_hl(addr.wrapping_sub(1));
+                8
+            }
             0x76 => {
                 // HALT -- suspend CPU until an interrupt is pending
                 self.halted = true;
@@ -295,6 +314,13 @@ impl Cpu {
                 let src = opcode & 0x07;
                 let value = self.read_r8(bus, src);
                 self.alu_sub(value);
+                if src == 6 { 8 } else { 4 }
+            }
+            0x98..=0x9F => {
+                // SBC A, r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_sbc(value);
                 if src == 6 { 8 } else { 4 }
             }
             0xA0..=0xA7 => {
@@ -398,6 +424,12 @@ impl Cpu {
                 self.ime = true;
                 16
             }
+            0xDE => {
+                // SBC A, n
+                let n = self.fetch_byte(bus);
+                self.alu_sbc(n);
+                8
+            }
             0xE0 => {
                 // LDH (n), A - store from A to the high page
                 let n = self.fetch_byte(bus);
@@ -441,6 +473,12 @@ impl Cpu {
                 // Game uses this to guard critical sections.
                 self.ime = false;
                 4
+            }
+            0xF6 => {
+                // OR n
+                let n = self.fetch_byte(bus);
+                self.alu_or(n);
+                8
             }
             0xFA => {
                 // LD A, (nn)
@@ -822,6 +860,17 @@ impl Cpu {
         self.a = result;
     }
 
+    fn alu_sbc(&mut self, value: u8) {
+        let a = self.a;
+        let carry = self.get_carry_flag() as u8; // the carry-in: 0 or 1
+        let result = a.wrapping_sub(value).wrapping_sub(carry);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(true);
+        self.set_half_carry_flag((a & 0x0F) < (value & 0x0F) + carry);
+        self.set_carry_flag((a as u16) < (value as u16) + carry as u16);
+        self.a = result;
+    }
+
     // Flag accessors (F register, high nibble only)
 
     fn get_zero_flag(&self) -> bool {
@@ -1021,6 +1070,19 @@ mod tests {
             cpu.get_carry_flag(),
             "DEC must preserve carry -- not clear it"
         );
+    }
+
+    // 0x07 -- RLCA
+
+    #[test]
+    fn rlca_clears_z_even_on_zero_result() {
+        let (mut cpu, mut bus) = setup(&[0x07]); // RLCA
+        cpu.a = 0x00;
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, 4, "RLCA should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "0x00 rotated is still 0x00");
+        assert!(!cpu.get_zero_flag(), "RLCA ALWAYS clears Z -- even on zero");
+        assert!(!cpu.get_carry_flag(), "bit 7 of 0x00 is clear: carry clear");
     }
 
     // 0x09..=0x39 ADD HL, rr -- adds a pair to HL. Slot 3 is SP (arith table,
@@ -1401,6 +1463,65 @@ mod tests {
             !cpu.get_carry_flag(),
             "equal values: no full borrow, C clear"
         );
+    }
+
+    // 0x98..=0x9F SBC A, r / 0xDE SBC A, n -- subtract operand AND the carry-in.
+
+    #[test]
+    fn sbc_n_subtracts_the_carry_in() {
+        let (mut cpu, mut bus) = setup(&[0xDE, 0x02]); // SBC A, 0x02
+        cpu.a = 0x05;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SBC n should take 8 cycles");
+        assert_eq!(
+            cpu.a, 0x02,
+            "5 - 2 - 1(carry) = 2 -- carry-in is subtracted"
+        );
+        assert!(!cpu.get_zero_flag(), "0x02 nonzero: Z clear");
+        assert!(cpu.get_subtract_flag(), "SBC sets N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "0x5 >= 0x2+1: no low-nibble borrow"
+        );
+        assert!(!cpu.get_carry_flag(), "0x05 >= 0x02+1: no full borrow");
+    }
+
+    #[test]
+    fn sbc_n_carry_in_alone_forces_half_borrow() {
+        let (mut cpu, mut bus) = setup(&[0xDE, 0x00]); // SBC A, 0x00
+        cpu.a = 0x10;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SBC n should take 8 cycles");
+        assert_eq!(cpu.a, 0x0F, "0x10 - 0 - 1(carry) = 0x0F");
+        assert!(!cpu.get_zero_flag(), "0x0F nonzero: Z clear");
+        assert!(cpu.get_subtract_flag(), "SBC sets N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "carry-in forces low-nibble borrow: 0x0 < 0x0+1, H set"
+        );
+        assert!(!cpu.get_carry_flag(), "0x10 >= 0x00+1: no full borrow");
+    }
+
+    #[test]
+    fn sbc_n_carry_clear_behaves_like_sub() {
+        let (mut cpu, mut bus) = setup(&[0xDE, 0x02]); // SBC A, 0x02
+        cpu.a = 0x05;
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "SBC n should take 8 cycles");
+        assert_eq!(cpu.a, 0x03, "5 - 2 - 0(no carry) = 3 -- like SUB");
+        assert!(!cpu.get_zero_flag(), "0x03 nonzero: Z clear");
+        assert!(cpu.get_subtract_flag(), "SBC sets N");
+        assert!(!cpu.get_half_carry_flag(), "0x5 >= 0x2: no borrow");
+        assert!(!cpu.get_carry_flag(), "0x05 >= 0x02: no full borrow");
     }
 
     // 0xAF XOR A
