@@ -45,11 +45,12 @@ impl Cpu {
 
     pub fn handle_interrupts(&mut self, bus: &mut Bus) -> u8 {
         let pending = bus.read_byte(0xFF0F) & bus.read_byte(0xFFFF);
-
         if pending != 0 {
             self.halted = false; // a pending interrupt wakes HALT, even if IME is off
         }
-
+        if !self.ime {
+            return 0;
+        }
         if !self.ime {
             return 0; // master switch off: nothing to service
         }
@@ -358,13 +359,6 @@ impl Cpu {
                 self.alu_sub(n);
                 8
             }
-            0xD9 => {
-                // RETI -- return from interrupt: pop pc AND re-enable interrupts.
-                // The IME restore is what makes the next interrupt able to fire.
-                self.pc = self.pop_word(bus);
-                self.ime = true;
-                16
-            }
             0xE0 => {
                 // LDH (n), A - store from A to the high page
                 let n = self.fetch_byte(bus);
@@ -403,12 +397,6 @@ impl Cpu {
                 self.a = bus.read_byte(addr);
                 12
             }
-            0xF3 => {
-                // DI -- disable interrupts. Clears IME immediately.
-                // Game uses this to guard critical sections.
-                self.ime = false;
-                4
-            }
             0xFA => {
                 // LD A, (nn)
                 // Fetch a 16-bit immediate address and load
@@ -434,41 +422,134 @@ impl Cpu {
         }
     }
 
-    fn step_cb(&mut self, bus: &mut Bus, pc: u16) -> u8 {
-        let cb_opcode = self.fetch_byte(bus);
-        match cb_opcode {
-            0x12 => {
-                // RL D -- rotate D left through carry: old C -> bit 0, bit 7 -> new C
-                let value = self.read_r8(bus, 2); // D
-                let old_carry = self.get_carry_flag();
-                let new_carry = (value & 0x80) != 0;
-                let result = (value << 1) | (old_carry as u8);
-                self.set_zero_flag(result == 0);
+    fn step_cb(&mut self, bus: &mut Bus, _pc: u16) -> u8 {
+        let cb = self.fetch_byte(bus);
+        let index = cb & 0x07; // low 3 bits: register B C D E H L (HL) A
+        let bit = (cb >> 3) & 0x07; // middle 3 bits: rotate-select OR bit number
+
+        // (HL) operations cost 16 cycles (read-modify-write memory); register
+        // ops cost 8. BIT (HL) is the exception at 12 (read only, no write-back).
+        match cb >> 6 {
+            // 0b00: rotates and shifts, sub-selected by `bit`
+            0 => {
+                let value = self.read_r8(bus, index);
+                let result = match bit {
+                    0 => self.rlc(value),
+                    1 => self.rrc(value),
+                    2 => self.rl(value),
+                    3 => self.rr(value),
+                    4 => self.sla(value),
+                    5 => self.sra(value),
+                    6 => self.swap(value),
+                    7 => self.srl(value),
+                    _ => unreachable!(),
+                };
+                self.write_r8(bus, index, result);
+                if index == 6 { 16 } else { 8 }
+            }
+            // 0b01: BIT b, r -- test bit `bit` of the operand, set Z to its complement
+            1 => {
+                let value = self.read_r8(bus, index);
+                self.set_zero_flag(value & (1 << bit) == 0);
                 self.set_subtract_flag(false);
-                self.set_half_carry_flag(false);
-                self.set_carry_flag(new_carry);
-                self.write_r8(bus, 2, result);
-                8
+                self.set_half_carry_flag(true);
+                // carry preserved; BIT never writes back
+                if index == 6 { 12 } else { 8 }
             }
-            0x23 => {
-                // SLA E -- shift E left arithmetically
-                let value = self.read_r8(bus, 3); // E
-                let carry = (value & 0x80) != 0;
-                let result = value << 1;
-                self.set_zero_flag(result == 0);
-                self.set_subtract_flag(false);
-                self.set_half_carry_flag(false);
-                self.set_carry_flag(carry);
-                self.write_r8(bus, 3, result);
-                8
+            // 0b10: RES b, r -- clear bit `bit`
+            2 => {
+                let value = self.read_r8(bus, index);
+                self.write_r8(bus, index, value & !(1 << bit));
+                if index == 6 { 16 } else { 8 }
             }
-            0x87 => {
-                // RES 0, A
-                self.a &= !0x01;
-                8
+            // 0b11: SET b, r -- set bit `bit`
+            3 => {
+                let value = self.read_r8(bus, index);
+                self.write_r8(bus, index, value | (1 << bit));
+                if index == 6 { 16 } else { 8 }
             }
-            _ => panic!("unimplemented CB opcode {:#04x} at {:#06x}", cb_opcode, pc),
+            _ => unreachable!(),
         }
+    }
+
+    // CB rotate/shift operations: take a byte, return the result, set flags.
+    // All set Z from result, clear N and H, and route the shifted-out bit to C.
+
+    fn rlc(&mut self, value: u8) -> u8 {
+        // Rotate left: bit 7 -> carry AND -> bit 0 (circular, no carry-in)
+        let carry = (value & 0x80) != 0;
+        let result = value.rotate_left(1);
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn rrc(&mut self, value: u8) -> u8 {
+        // Rotate right: bit 0 -> carry AND -> bit 7 (circular)
+        let carry = (value & 0x01) != 0;
+        let result = value.rotate_right(1);
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn rl(&mut self, value: u8) -> u8 {
+        // Rotate left through carry: old carry -> bit 0, bit 7 -> carry
+        let old_carry = self.get_carry_flag();
+        let carry = (value & 0x80) != 0;
+        let result = (value << 1) | (old_carry as u8);
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn rr(&mut self, value: u8) -> u8 {
+        // Rotate right through carry: old carry -> bit 7, bit 0 -> carry
+        let old_carry = self.get_carry_flag();
+        let carry = (value & 0x01) != 0;
+        let result = (value >> 1) | ((old_carry as u8) << 7);
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn sla(&mut self, value: u8) -> u8 {
+        // Shift left arithmetic: bit 7 -> carry, 0 -> bit 0
+        let carry = (value & 0x80) != 0;
+        let result = value << 1;
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn sra(&mut self, value: u8) -> u8 {
+        // Shift right arithmetic: bit 0 -> carry, bit 7 PRESERVED (sign-extending)
+        let carry = (value & 0x01) != 0;
+        let result = (value >> 1) | (value & 0x80); // keep the top bit
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn swap(&mut self, value: u8) -> u8 {
+        // Swap nibbles. Carry CLEARED (no shifted-out bit), unlike the others.
+        let result = (value >> 4) | (value << 4);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(false);
+        self.set_carry_flag(false);
+        result
+    }
+
+    fn srl(&mut self, value: u8) -> u8 {
+        // Shift right logical: bit 0 -> carry, 0 -> bit 7
+        let carry = (value & 0x01) != 0;
+        let result = value >> 1;
+        self.set_rotate_flags(result, carry);
+        result
+    }
+
+    fn set_rotate_flags(&mut self, result: u8, carry: bool) {
+        // Shared flag pattern for rotates/shifts (not SWAP, which clears C):
+        // Z from result, N and H cleared, C = the shifted-out bit.
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag(false);
+        self.set_carry_flag(carry);
     }
 
     pub fn print_trace(&self, bus: &Bus) {
@@ -1744,5 +1825,101 @@ mod tests {
             cpu.sp, 0xC100,
             "sp untouched -- no pop on the not-taken path"
         );
+    }
+
+    // CB table collapse
+
+    #[test]
+    fn cb_sla_e_still_works_after_collapse() {
+        // 0x23 = SLA E (the hand-written op this collapse replaces). 0x81 -> 0x02, C set.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x23]);
+        cpu.e = 0x81;
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, 8);
+        assert_eq!(cpu.e, 0x02, "SLA E: 0x81 << 1 = 0x02");
+        assert!(cpu.get_carry_flag(), "bit 7 -> carry");
+    }
+
+    #[test]
+    fn cb_rl_d_still_works_after_collapse() {
+        // 0x12 = RL D. D=0x00 with carry set -> 0x01 (old carry into bit 0).
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x12]);
+        cpu.d = 0x00;
+        cpu.set_carry_flag(true);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.d, 0x01, "RL D: old carry feeds bit 0");
+        assert!(!cpu.get_carry_flag(), "bit 7 was clear");
+    }
+
+    #[test]
+    fn cb_swap_a() {
+        // 0x37 = SWAP A. 0xAB -> 0xBA, all flags but Z cleared.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x37]);
+        cpu.a = 0xAB;
+        cpu.set_carry_flag(true);
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0xBA, "SWAP A swaps nibbles");
+        assert!(!cpu.get_carry_flag(), "SWAP clears C");
+    }
+
+    #[test]
+    fn cb_bit_tests_without_writing() {
+        // 0x40 = BIT 0, B. B=0x01 -> bit 0 set -> Z clear. B unchanged.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x40]);
+        cpu.b = 0x01;
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, 8);
+        assert!(!cpu.get_zero_flag(), "bit 0 of 0x01 is set: Z clear");
+        assert!(cpu.get_half_carry_flag(), "BIT always sets H");
+        assert_eq!(cpu.b, 0x01, "BIT must not modify the operand");
+
+        // 0x48 = BIT 1, B. B=0x01 -> bit 1 clear -> Z set.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x48]);
+        cpu.b = 0x01;
+        cpu.step(&mut bus);
+        assert!(cpu.get_zero_flag(), "bit 1 of 0x01 is clear: Z set");
+    }
+
+    #[test]
+    fn cb_res_and_set() {
+        // 0x80 = RES 0, B. B=0xFF -> clear bit 0 -> 0xFE.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x80]);
+        cpu.b = 0xFF;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.b, 0xFE, "RES 0 clears bit 0");
+
+        // 0xC7 = SET 0, A. A=0x00 -> set bit 0 -> 0x01.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0xC7]);
+        cpu.a = 0x00;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0x01, "SET 0 sets bit 0");
+    }
+
+    #[test]
+    fn cb_hl_memory_path_costs_more() {
+        // 0x36 = SWAP (HL): read-modify-write memory -> 16 cycles.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x36]);
+        cpu.set_hl(0xC050);
+        bus.write_byte(0xC050, 0xAB);
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, 16, "SWAP (HL) is read-modify-write: 16 cycles");
+        assert_eq!(bus.read_byte(0xC050), 0xBA, "nibbles swapped in memory");
+
+        // 0x46 = BIT 0, (HL): read-only -> 12 cycles (not 16).
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x46]);
+        cpu.set_hl(0xC050);
+        bus.write_byte(0xC050, 0x01);
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, 12, "BIT (HL) reads only: 12 cycles");
+    }
+
+    #[test]
+    fn cb_sra_preserves_sign_bit() {
+        // 0x2F = SRA A. SRA keeps bit 7 (arithmetic). 0x80 -> 0xC0, bit 0 (0) -> carry clear.
+        let (mut cpu, mut bus) = setup(&[0xCB, 0x2F]);
+        cpu.a = 0x80;
+        cpu.step(&mut bus);
+        assert_eq!(cpu.a, 0xC0, "SRA preserves the sign bit: 0x80 -> 0xC0");
+        assert!(!cpu.get_carry_flag(), "bit 0 was clear: carry clear");
     }
 }
