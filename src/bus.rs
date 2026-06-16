@@ -77,7 +77,6 @@ impl Bus {
                 if value & 0x80 != 0 {
                     let byte = self.io[0x01]; // SB, the data byte
                     print!("{}", byte as char);
-                    print!("{}", byte as char);
                     std::io::stdout().flush().unwrap();
                 }
                 self.io[(addr - 0xFF00) as usize] = value & 0x7F; // clear start bit: transfer "complete"
