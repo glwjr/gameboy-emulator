@@ -35,7 +35,7 @@ impl GameBoy {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let path = "test_roms/02-interrupts.gb";
+    let path = "test_roms/cpu_instrs.gb";
     let rom = fs::read(path)?;
 
     let mut gameboy = GameBoy::new(rom);
