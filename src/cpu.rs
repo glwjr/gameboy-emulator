@@ -315,6 +315,13 @@ impl Cpu {
                 self.alu_add(value);
                 if src == 6 { 8 } else { 4 }
             }
+            0x88..=0x8F => {
+                // ADC A, r
+                let src = opcode & 0x07;
+                let value = self.read_r8(bus, src);
+                self.alu_adc(value);
+                if src == 6 { 8 } else { 4 }
+            }
             0x90..=0x97 => {
                 // SUB r
                 let src = opcode & 0x07;
@@ -384,6 +391,17 @@ impl Cpu {
                 self.pc = addr;
                 16
             }
+            0xC4 | 0xCC | 0xD4 | 0xDC => {
+                // CALL cc, nn -- conditional call (24 taken / 12 not)
+                let target = self.fetch_word(bus);
+                if self.condition(opcode) {
+                    self.push_word(bus, self.pc);
+                    self.pc = target;
+                    24
+                } else {
+                    12
+                }
+            }
             0xC5 | 0xD5 | 0xE5 | 0xF5 => {
                 // PUSH rr
                 let index = (opcode >> 4) & 0x03;
@@ -416,6 +434,12 @@ impl Cpu {
                 self.push_word(bus, self.pc);
                 self.pc = target;
                 24
+            }
+            0xCE => {
+                // ADC A, n
+                let n = self.fetch_byte(bus);
+                self.alu_adc(n);
+                8
             }
             0xD6 => {
                 // SUB n
@@ -466,6 +490,12 @@ impl Cpu {
                 let addr = self.fetch_word(bus);
                 bus.write_byte(addr, self.a);
                 16
+            }
+            0xEE => {
+                // XOR n
+                let n = self.fetch_byte(bus);
+                self.alu_xor(n);
+                8
             }
             0xF0 => {
                 // LDH A, (n) - load into A from the high page
@@ -874,6 +904,17 @@ impl Cpu {
         self.set_subtract_flag(true);
         self.set_half_carry_flag((a & 0x0F) < (value & 0x0F) + carry);
         self.set_carry_flag((a as u16) < (value as u16) + carry as u16);
+        self.a = result;
+    }
+
+    fn alu_adc(&mut self, value: u8) {
+        let a = self.a;
+        let carry = self.get_carry_flag() as u8; // carry-in, captured before flags change
+        let result = a.wrapping_add(value).wrapping_add(carry);
+        self.set_zero_flag(result == 0);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag((a & 0x0F) + (value & 0x0F) + carry > 0x0F);
+        self.set_carry_flag((a as u16) + (value as u16) + carry as u16 > 0xFF);
         self.a = result;
     }
 
@@ -1434,6 +1475,76 @@ mod tests {
         assert_eq!(cpu.b, 0x42, "the byte at (HL) lands in B");
     }
 
+    // 0x88..=0x8F ADC A, r / 0xCE ADC A, n -- add operand AND the carry-in.
+    // Overflow-style H/C with the carry-in folded in.
+
+    #[test]
+    fn adc_n_adds_the_carry_in() {
+        // A=0x05, carry SET, ADC 0x02 -> 5 + 2 + 1 = 0x08.
+        // A plain ADD would give 0x07 -- this proves the carry-in is added.
+        let (mut cpu, mut bus) = setup(&[0xCE, 0x02]); // ADC A, 0x02
+        cpu.a = 0x05;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADC n should take 8 cycles");
+        assert_eq!(cpu.a, 0x08, "5 + 2 + 1(carry) = 8 -- carry-in is added");
+        assert!(!cpu.get_zero_flag(), "0x08 nonzero: Z clear");
+        assert!(!cpu.get_subtract_flag(), "ADC clears N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "0x5+0x2+1=0x8, no nibble overflow: H clear"
+        );
+        assert!(!cpu.get_carry_flag(), "no byte overflow: C clear");
+    }
+
+    #[test]
+    fn adc_n_carry_in_alone_forces_half_carry() {
+        // A=0x0F, carry SET, ADC 0x00 -> 0x0F + 0 + 1 = 0x10.
+        // The carry-in ALONE overflows the low nibble: 0xF + 0x0 + 1 = 0x10 > 0xF -> H set.
+        // Isolates the carry-in's effect on H -- ADD 0x00 wouldn't overflow.
+        let (mut cpu, mut bus) = setup(&[0xCE, 0x00]); // ADC A, 0x00
+        cpu.a = 0x0F;
+        cpu.set_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADC n should take 8 cycles");
+        assert_eq!(cpu.a, 0x10, "0x0F + 0 + 1(carry) = 0x10");
+        assert!(!cpu.get_zero_flag(), "0x10 nonzero: Z clear");
+        assert!(!cpu.get_subtract_flag(), "ADC clears N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "carry-in alone overflows the nibble: 0xF+0+1 > 0xF, H set"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "0xF+0+1=0x10 < 0x100: no byte overflow, C clear"
+        );
+    }
+
+    #[test]
+    fn adc_n_carry_clear_behaves_like_add() {
+        // A=0x05, carry CLEAR, ADC 0x02 -> 5 + 2 + 0 = 0x07.
+        // With no carry-in, ADC reduces to plain ADD.
+        let (mut cpu, mut bus) = setup(&[0xCE, 0x02]); // ADC A, 0x02
+        cpu.a = 0x05;
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 8, "ADC n should take 8 cycles");
+        assert_eq!(cpu.a, 0x07, "5 + 2 + 0(no carry) = 7 -- like ADD");
+        assert!(!cpu.get_zero_flag(), "0x07 nonzero: Z clear");
+        assert!(!cpu.get_subtract_flag(), "ADC clears N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "0x5+0x2=0x7, no overflow: H clear"
+        );
+        assert!(!cpu.get_carry_flag(), "no byte overflow: C clear");
+    }
+
     // 0x90..=0x97 SUB r / 0xD6 SUB n -- subtract from A, KEEP result (CP discards it)
 
     #[test]
@@ -1578,6 +1689,41 @@ mod tests {
         assert!(!cpu.get_subtract_flag(), "OR always clears N");
         assert!(!cpu.get_half_carry_flag(), "OR always clears H");
         assert!(!cpu.get_carry_flag(), "OR always clears carry");
+    }
+
+    // 0xC4 | 0xCC | 0xD4 | 0xDC -- CALL cc, nn
+
+    #[test]
+    fn call_nz_taken_pushes_and_jumps() {
+        // Z clear -> taken. Push return addr (0xC003), jump to target.
+        let (mut cpu, mut bus) = setup(&[0xC4, 0x34, 0x12]); // CALL NZ, 0x1234
+        cpu.set_zero_flag(false);
+        cpu.sp = 0xFFFE;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 24, "taken conditional CALL costs 24");
+        assert_eq!(cpu.pc, 0x1234, "taken: jumped to target");
+        assert_eq!(cpu.sp, 0xFFFC, "taken: pushed 2 bytes");
+        assert_eq!(
+            bus.read_word(cpu.sp),
+            0xC003,
+            "pushed return addr is after the instruction"
+        );
+    }
+
+    #[test]
+    fn call_nz_not_taken_no_push() {
+        // Z set -> not taken. Operand consumed (pc past 3 bytes), but NO push.
+        let (mut cpu, mut bus) = setup(&[0xC4, 0x34, 0x12]); // CALL NZ, 0x1234 (ignored)
+        cpu.set_zero_flag(true);
+        cpu.sp = 0xFFFE;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "not-taken conditional CALL costs 12");
+        assert_eq!(cpu.pc, 0xC003, "not taken: pc past all 3 bytes, no jump");
+        assert_eq!(cpu.sp, 0xFFFE, "not taken: sp untouched -- NO push");
     }
 
     // 0xC7..=0xFF RST -- single-byte call to a fixed vector (ttt * 8)

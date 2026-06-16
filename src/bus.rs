@@ -1,3 +1,5 @@
+use std::io::Write;
+
 pub struct Bus {
     rom: Vec<u8>,
     rom_bank: u8,
@@ -75,6 +77,8 @@ impl Bus {
                 if value & 0x80 != 0 {
                     let byte = self.io[0x01]; // SB, the data byte
                     print!("{}", byte as char);
+                    print!("{}", byte as char);
+                    std::io::stdout().flush().unwrap();
                 }
                 self.io[(addr - 0xFF00) as usize] = value & 0x7F; // clear start bit: transfer "complete"
             }
