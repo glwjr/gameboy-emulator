@@ -364,6 +364,13 @@ impl Cpu {
                 self.a = bus.read_byte(addr);
                 16
             }
+            0xFB => {
+                // EI -- enable interrupts. Real hardware delays this by one instruction
+                // (interrupts fire after the NEXT instruction); not modeled yet since
+                // there's no interrupt dispatch to delay. Sets IME immediately for now.
+                self.ime = true;
+                4
+            }
             0xFE => {
                 // CP n
                 let n = self.fetch_byte(bus);

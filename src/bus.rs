@@ -1,5 +1,7 @@
 pub struct Bus {
     rom: Vec<u8>,
+    rom_bank: u8,
+    ram_enabled: bool,
     vram: [u8; 0x2000],
     cart_ram: [u8; 0x2000],
     wram: [u8; 0x2000],
@@ -14,6 +16,8 @@ impl Bus {
     pub fn new(rom: Vec<u8>) -> Self {
         Bus {
             rom,
+            rom_bank: 1,
+            ram_enabled: false,
             vram: [0; 0x2000],
             cart_ram: [0; 0x2000],
             wram: [0; 0x2000],
@@ -27,7 +31,12 @@ impl Bus {
 
     pub fn read_byte(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x7FFF => self.rom[addr as usize],
+            0x0000..=0x3FFF => self.rom[addr as usize],
+            0x4000..=0x7FFF => {
+                let bank_base = self.rom_bank as usize * 0x4000;
+                let offset = addr as usize - 0x4000;
+                self.rom[bank_base + offset]
+            }
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
             0xA000..=0xBFFF => self.cart_ram[(addr - 0xA000) as usize],
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
@@ -42,7 +51,18 @@ impl Bus {
 
     pub fn write_byte(&mut self, addr: u16, value: u8) {
         match addr {
-            0x0000..=0x7FFF => {}
+            0x0000..=0x1FFF => {
+                // RAM enable: 0x0A in the low nibble enables, anything else disables
+                self.ram_enabled = (value & 0x0F) == 0x0A;
+            }
+            0x2000..=0x3FFF => {
+                // ROM bank select (low 5 bits). Bank 0 remaps to 1.
+                let bank = value & 0x1F;
+                self.rom_bank = if bank == 0 { 1 } else { bank };
+            }
+            0x4000..=0x7FFF => {
+                // Upper bits / mode -- unused for 512KB (32 banks fit in 5 bits).
+            }
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize] = value,
             0xA000..=0xBFFF => self.cart_ram[(addr - 0xA000) as usize] = value,
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = value,
