@@ -69,6 +69,15 @@ impl Bus {
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize] = value,
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFEA0..=0xFEFF => {}
+            0xFF02 => {
+                // SC, serial control -- writing 0x81 (bit 7 set) starts a transfer.
+                // Intercept it: emit the SB byte to stdout.
+                if value & 0x80 != 0 {
+                    let byte = self.io[0x01]; // SB, the data byte
+                    print!("{}", byte as char);
+                }
+                self.io[(addr - 0xFF00) as usize] = value & 0x7F; // clear start bit: transfer "complete"
+            }
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
             0xFFFF => self.ie = value,
