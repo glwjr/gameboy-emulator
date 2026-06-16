@@ -159,6 +159,12 @@ impl Cpu {
                 self.set_bc(bc.wrapping_sub(1));
                 8
             }
+            0x0F => {
+                // RRCA -- rotate A right circular
+                self.a = self.rrc(self.a);
+                self.set_zero_flag(false); // accumulator rotate: Z always clear
+                4
+            }
             0x10 => {
                 // STOP -- 2-byte opcode (0x10 0x00); second byte consumed and ignored.
                 // Real hardware halts CPU+LCD until a button interrupt (or does the
@@ -1153,6 +1159,19 @@ mod tests {
             !cpu.get_carry_flag(),
             "INC must preserve carry -- false stays false"
         );
+    }
+
+    // 0x0F RRCA -- rotate A right circular
+
+    #[test]
+    fn rrca_clears_z_even_on_zero_result() {
+        let (mut cpu, mut bus) = setup(&[0x0F]); // RRCA
+        cpu.a = 0x00;
+        let cycles = cpu.step(&mut bus);
+        assert_eq!(cycles, 4, "RRCA should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "0x00 rotated is still 0x00");
+        assert!(!cpu.get_zero_flag(), "RRCA ALWAYS clears Z -- even on zero");
+        assert!(!cpu.get_carry_flag(), "bit 0 of 0x00 is clear: carry clear");
     }
 
     // 0x17 RLA -- rotate A left through carry; Z ALWAYS cleared
