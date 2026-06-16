@@ -12,6 +12,8 @@ pub struct Bus {
     hram: [u8; 0x7F],
     ie: u8,
     scanline_cycles: u32,
+    div_cycles: u16,
+    tima_cycles: u32,
 }
 
 impl Bus {
@@ -28,6 +30,8 @@ impl Bus {
             hram: [0; 0x7F],
             ie: 0,
             scanline_cycles: 0,
+            div_cycles: 0,
+            tima_cycles: 0,
         }
     }
 
@@ -72,14 +76,19 @@ impl Bus {
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
             0xFEA0..=0xFEFF => {}
             0xFF02 => {
-                // SC, serial control -- writing 0x81 (bit 7 set) starts a transfer.
+                // SC, serial control -- writing 0x81 (bit 7 set) starts a transfer
                 // Intercept it: emit the SB byte to stdout.
                 if value & 0x80 != 0 {
                     let byte = self.io[0x01]; // SB, the data byte
                     print!("{}", byte as char);
                     std::io::stdout().flush().unwrap();
                 }
-                self.io[(addr - 0xFF00) as usize] = value & 0x7F; // clear start bit: transfer "complete"
+                self.io[(addr - 0xFF00) as usize] = value & 0x7F; // clear start bit
+            }
+            0xFF04 => {
+                // DIV -- any write resets it (and its accumulator) to zero
+                self.io[0x04] = 0;
+                self.div_cycles = 0;
             }
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
@@ -99,20 +108,50 @@ impl Bus {
     }
 
     pub fn tick(&mut self, cycles: u8) {
-        // Accumulate: Add the incoming cycles to the field
         self.scanline_cycles += cycles as u32;
+        self.div_cycles += cycles as u16;
 
-        // Check if a scanline's worth has elapsed and carry the remainder
+        // LY / VBlank
         if self.scanline_cycles >= 456 {
             self.scanline_cycles -= 456;
-
-            // Advance LY with the wrap
             let ly = self.io[0x44];
             let new_ly = if ly >= 153 { 0 } else { ly + 1 };
             self.io[0x44] = new_ly;
-
             if new_ly == 144 {
                 self.io[0x0F] |= 0x01; // request VBlank interrupt (IF bit 0)
+            }
+        }
+
+        // DIV: free-running, increments every 256 cycles
+        if self.div_cycles >= 256 {
+            self.div_cycles -= 256;
+            self.io[0x04] = self.io[0x04].wrapping_add(1);
+        }
+
+        // TIMA: configurable counter, only when enabled (TAC bit 2)
+        if self.io[0x07] & 0x04 != 0 {
+            let threshold: u32 = match self.io[0x07] & 0x03 {
+                0 => 1024, // 4096 Hz
+                1 => 16,   // 262144 Hz
+                2 => 64,   // 65536 Hz
+                3 => 256,  // 16384 Hz
+                _ => unreachable!(),
+            };
+
+            self.tima_cycles += cycles as u32;
+            // while, not if: a single instruction can cross the threshold more
+            // than once at the fastest (16-cycle) rate.
+            while self.tima_cycles >= threshold {
+                self.tima_cycles -= threshold;
+                let (new_tima, overflow) = self.io[0x05].overflowing_add(1);
+                if overflow {
+                    // On overflow: reload from TMA (not 0) and request the
+                    // timer interrupt (IF bit 2).
+                    self.io[0x05] = self.io[0x06]; // TMA
+                    self.io[0x0F] |= 0x04; // IF bit 2 = timer
+                } else {
+                    self.io[0x05] = new_tima;
+                }
             }
         }
     }

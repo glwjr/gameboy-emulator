@@ -19,6 +19,7 @@ pub struct Cpu {
     sp: u16,
     pc: u16,
     ime: bool,
+    ime_pending: bool,
     halted: bool,
 }
 
@@ -37,6 +38,7 @@ impl Cpu {
             sp: 0xFFFE,
             pc: 0x0100,
             ime: false,
+            ime_pending: false,
             halted: false,
         }
     }
@@ -54,28 +56,29 @@ impl Cpu {
             return 0; // master switch off: nothing to service
         }
 
-        let requested = bus.read_byte(0xFF0F); // IF
-        let enabled = bus.read_byte(0xFFFF); // IE
-        let pending = requested & enabled; // both set = serviceable
-
         if pending == 0 {
-            return 0; // nothing pending+enabled
+            return 0; // nothing pending + enabled
         }
 
-        // VBlank = bit 0, vector 0x40. (Others added later)
-        if pending & 0x01 != 0 {
-            self.ime = false;
-            let new_if = requested & !0x01; // clear the VBlank request
-            bus.write_byte(0xFF0F, new_if);
-            self.push_word(bus, self.pc);
-            self.pc = 0x40;
-            return 20;
+        // Service the highest-priority pending interrupt (bit 0 = highest).
+        // Each: clear its IF bit, disable IME, push pc, jump to its vector.
+        for bit in 0..5 {
+            if pending & (1 << bit) != 0 {
+                self.ime = false;
+                let if_reg = bus.read_byte(0xFF0F);
+                bus.write_byte(0xFF0F, if_reg & !(1 << bit)); // clear THIS request
+                self.push_word(bus, self.pc);
+                self.pc = 0x40 + (bit as u16) * 8; // vectors: 0x40,0x48,0x50,0x58,0x60
+                return 20;
+            }
         }
 
         0
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u8 {
+        let was_pending = self.ime_pending;
+
         if self.halted {
             return 4; // halted: burn time until an interrupt wakes us
         }
@@ -90,7 +93,7 @@ impl Cpu {
         let pc = self.pc;
         let opcode = self.fetch_byte(bus);
 
-        match opcode {
+        let cycles = match opcode {
             0x00 => 4, // NOP
             0x01 => {
                 // LD BC, nn - load a 16-bit immediate into BC
@@ -345,6 +348,15 @@ impl Cpu {
                 self.sp = self.sp.wrapping_sub(1);
                 8
             }
+            0x3F => {
+                // CCF -- complement (flip) carry flag. N and H cleared; Z preserved.
+                let carry = self.get_carry_flag();
+                self.set_carry_flag(!carry);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                // Z preserved -- CCF doesn't touch it
+                4
+            }
             0x76 => {
                 // HALT -- suspend CPU until an interrupt is pending
                 self.halted = true;
@@ -568,9 +580,9 @@ impl Cpu {
                 8
             }
             0xF3 => {
-                // DI -- disable interrupts. Clears IME immediately.
-                // Game uses this to guard critical sections.
+                // DI -- disable interrupts immediately, and cancel any pending EI enable
                 self.ime = false;
+                self.ime_pending = false;
                 4
             }
             0xF6 => {
@@ -600,10 +612,8 @@ impl Cpu {
                 16
             }
             0xFB => {
-                // EI -- enable interrupts. Real hardware delays this by one instruction
-                // (interrupts fire after the NEXT instruction); not modeled yet since
-                // there's no interrupt dispatch to delay. Sets IME immediately for now.
-                self.ime = true;
+                // EI -- enable interrupts AFTER the next instruction (the hardware delay)
+                self.ime_pending = true;
                 4
             }
             0xFE => {
@@ -613,7 +623,17 @@ impl Cpu {
                 8
             }
             _ => panic!("unimplemented opcode {:#04x} at {:#06x}", opcode, pc),
+        };
+
+        // EI's one-instruction delay: if EI ran on a PRIOR step, ime_pending was
+        // set then. Now that one full instruction has executed since, enable IME.
+        // Captured as was_pending at the top, so EI's own step doesn't trigger it.
+        if was_pending {
+            self.ime = true;
+            self.ime_pending = false;
         }
+
+        cycles
     }
 
     fn step_cb(&mut self, bus: &mut Bus, _pc: u16) -> u8 {
@@ -1642,6 +1662,25 @@ mod tests {
 
         assert_eq!(cycles, 12, "taken JR should cost 12 cycles");
         assert_eq!(cpu.pc, 0xC007, "carry set: jump taken, 0xC002 + 5 = 0xC007");
+    }
+
+    // 0x3F CCF
+
+    #[test]
+    fn ccf_flips_carry_clears_nh_preserves_z() {
+        let (mut cpu, mut bus) = setup(&[0x3F]); // CCF
+        cpu.set_carry_flag(true); // start SET -> CCF must clear it (proves flip, not set)
+        cpu.set_zero_flag(true); // pre-set Z to prove preservation
+        cpu.set_subtract_flag(true);
+        cpu.set_half_carry_flag(true);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "CCF should take 4 cycles");
+        assert!(!cpu.get_carry_flag(), "C was set, CCF flips it to clear");
+        assert!(!cpu.get_subtract_flag(), "CCF clears N");
+        assert!(!cpu.get_half_carry_flag(), "CCF clears H");
+        assert!(cpu.get_zero_flag(), "Z preserved -- was true, stays true");
     }
 
     // 0x46 LD B, (HL)

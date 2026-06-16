@@ -35,12 +35,12 @@ impl GameBoy {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let path = "test_roms/cpu_instrs.gb";
+    let path = "test_roms/02-interrupts.gb";
     let rom = fs::read(path)?;
 
     let mut gameboy = GameBoy::new(rom);
 
-    for _ in 0..10000000 {
+    for _ in 0..500_000_000 {
         gameboy.step();
     }
 
