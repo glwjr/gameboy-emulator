@@ -46,8 +46,7 @@ impl GameBoy {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    // let path = "roms/Legend of Zelda, The - Link's Awakening (USA, Europe).gb";
-    let path = "test_roms/cpu_instrs.gb";
+    let path = "roms/Legend of Zelda, The - Link's Awakening (USA, Europe).gb";
     let rom = fs::read(path)?;
     let mut gameboy = GameBoy::new(rom);
 

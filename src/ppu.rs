@@ -95,6 +95,75 @@ impl Ppu {
         }
     }
 
+    pub fn framebuffer(&self) -> &[u32] {
+        &self.framebuffer
+    }
+
+    fn tile_pixel(&self, tile_addr: usize, row: u8, col: u8) -> u8 {
+        let byte1 = self.vram[tile_addr + (row as usize) * 2];
+        let byte2 = self.vram[tile_addr + (row as usize) * 2 + 1];
+        let bit = 7 - col; // column 0 is the leftmost = bit 7
+        let low = (byte1 >> bit) & 1;
+        let high = (byte2 >> bit) & 1;
+        (high << 1) | low
+    }
+
+    fn apply_palette(&self, color_id: u8) -> u32 {
+        let shade = (self.bgp >> (color_id * 2)) & 0x03;
+        match shade {
+            0 => 0xFFFFFF, // white
+            1 => 0xAAAAAA, // light gray
+            2 => 0x555555, // dark gray
+            3 => 0x000000, // black
+            _ => unreachable!(),
+        }
+    }
+
+    fn render_scanline(&mut self) {
+        let ly = self.ly;
+        if ly >= 144 {
+            return;
+        } // only visible lines
+
+        // LCD off? leave blank.
+        if self.lcdc & 0x80 == 0 {
+            return;
+        }
+
+        // Tilemap base (LCDC bit 3) and tile-data mode (LCDC bit 4)
+        let tilemap_base: usize = if self.lcdc & 0x08 != 0 {
+            0x1C00
+        } else {
+            0x1800
+        };
+        let unsigned_tiles = self.lcdc & 0x10 != 0;
+
+        for x in 0..160u8 {
+            let bg_x = x.wrapping_add(self.scx);
+            let bg_y = ly.wrapping_add(self.scy);
+
+            let tile_col = (bg_x / 8) as usize;
+            let tile_row = (bg_y / 8) as usize;
+            let tile_index = tile_row * 32 + tile_col;
+            let tile_num = self.vram[tilemap_base + tile_index];
+
+            // Resolve tile data address (the LCDC bit-4 quirk)
+            let tile_addr: usize = if unsigned_tiles {
+                (tile_num as usize) * 16
+            } else {
+                // signed: base 0x1000 (=0x9000 in VRAM offset), index as i8
+                (0x1000_i32 + (tile_num as i8 as i32) * 16) as usize
+            };
+
+            let row = bg_y % 8;
+            let col = bg_x % 8;
+            let color_id = self.tile_pixel(tile_addr, row, col);
+            let color = self.apply_palette(color_id);
+
+            self.framebuffer[ly as usize * 160 + x as usize] = color;
+        }
+    }
+
     pub fn tick(&mut self, cycles: u8) -> InterruptRequest {
         let mut interrupts = InterruptRequest {
             vblank: false,
@@ -118,6 +187,7 @@ impl Ppu {
         if self.scanline_cycles >= 456 {
             self.scanline_cycles -= 456;
             self.ly = if self.ly >= 153 { 0 } else { self.ly + 1 };
+            self.render_scanline();
 
             if self.ly == 144 {
                 interrupts.vblank = true;
@@ -135,9 +205,5 @@ impl Ppu {
         }
 
         interrupts
-    }
-
-    pub fn framebuffer(&self) -> &[u32] {
-        &self.framebuffer
     }
 }
