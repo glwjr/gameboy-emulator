@@ -134,10 +134,16 @@ impl Cpu {
                 if dst == 6 { 12 } else { 8 }
             }
             0x07 => {
-                // RLCA -- rotate A left circular
+                // RLCA -- rotate A left circular. Z always cleared.
                 self.a = self.rlc(self.a);
                 self.set_zero_flag(false); // accumulator rotate: Z always clear
                 4
+            }
+            0x08 => {
+                // LD (nn), SP -- store SP (low byte then high) at immediate address nn.
+                let addr = self.fetch_word(bus);
+                bus.write_word(addr, self.sp);
+                20
             }
             0x09 | 0x19 | 0x29 | 0x39 => {
                 // ADD HL, rr
@@ -153,14 +159,13 @@ impl Cpu {
                 8
             }
             0x0B => {
-                // DEC BC
-                // Decrement the BC register pair -- no flags
+                // DEC BC -- no flags
                 let bc = self.get_bc();
                 self.set_bc(bc.wrapping_sub(1));
                 8
             }
             0x0F => {
-                // RRCA -- rotate A right circular
+                // RRCA -- rotate A right circular. Z always cleared.
                 self.a = self.rrc(self.a);
                 self.set_zero_flag(false); // accumulator rotate: Z always clear
                 4
@@ -254,6 +259,34 @@ impl Cpu {
                 self.set_hl(hl.wrapping_add(1));
                 8
             }
+            0x27 => {
+                // DAA -- decimal adjust A after BCD add/sub. Behavior depends on N, H, C
+                // flags from the prior operation.
+                let mut a = self.a;
+                let mut adjust = 0u8;
+                let mut carry = self.get_carry_flag();
+
+                if self.get_half_carry_flag() || (!self.get_subtract_flag() && (a & 0x0F) > 0x09) {
+                    adjust |= 0x06;
+                }
+                if carry || (!self.get_subtract_flag() && a > 0x99) {
+                    adjust |= 0x60;
+                    carry = true;
+                }
+
+                if self.get_subtract_flag() {
+                    a = a.wrapping_sub(adjust); // after subtraction: subtract the adjustment
+                } else {
+                    a = a.wrapping_add(adjust); // after addition: add it
+                }
+
+                self.a = a;
+                self.set_zero_flag(a == 0);
+                // N is preserved (not changed)
+                self.set_half_carry_flag(false); // H always cleared after DAA
+                self.set_carry_flag(carry);
+                4
+            }
             0x2A => {
                 // LD A, (HL+) - read from memory at HL into A, then increment HL
                 let addr = self.get_hl();
@@ -287,11 +320,29 @@ impl Cpu {
                 self.set_hl(addr.wrapping_sub(1));
                 8
             }
+            0x33 => {
+                // INC SP -- no flags
+                self.sp = self.sp.wrapping_add(1);
+                8
+            }
+            0x37 => {
+                // SCF -- set carry flag. N and H cleared; Z preserved.
+                self.set_carry_flag(true);
+                self.set_subtract_flag(false);
+                self.set_half_carry_flag(false);
+                // Z preserved -- SCF doesn't touch it
+                4
+            }
             0x3A => {
                 // LD A, (HL-) -- load A from address HL, then decrement HL
                 let addr = self.get_hl();
                 self.a = bus.read_byte(addr);
                 self.set_hl(addr.wrapping_sub(1));
+                8
+            }
+            0x3B => {
+                // DEC SP -- no flags
+                self.sp = self.sp.wrapping_sub(1);
                 8
             }
             0x76 => {
@@ -442,7 +493,7 @@ impl Cpu {
                 8
             }
             0xD6 => {
-                // SUB n
+                // SUB A, n
                 let n = self.fetch_byte(bus);
                 self.alu_sub(n);
                 8
@@ -474,10 +525,16 @@ impl Cpu {
                 8
             }
             0xE6 => {
-                // AND n
+                // AND A, n
                 let n = self.fetch_byte(bus);
                 self.alu_and(n);
                 8
+            }
+            0xE8 => {
+                // ADD SP, e -- add signed offset to SP
+                let e = self.fetch_byte(bus) as i8;
+                self.sp = self.add_sp_offset(e);
+                16
             }
             0xE9 => {
                 // JP HL -- jump to the address in HL (no memory read despite "(HL)" notation)
@@ -492,7 +549,7 @@ impl Cpu {
                 16
             }
             0xEE => {
-                // XOR n
+                // XOR A, n
                 let n = self.fetch_byte(bus);
                 self.alu_xor(n);
                 8
@@ -504,6 +561,12 @@ impl Cpu {
                 self.a = bus.read_byte(addr);
                 12
             }
+            0xF2 => {
+                // LD A, (C) -- load A from high page at 0xFF00 + C
+                let addr = 0xFF00 | (self.c as u16);
+                self.a = bus.read_byte(addr);
+                8
+            }
             0xF3 => {
                 // DI -- disable interrupts. Clears IME immediately.
                 // Game uses this to guard critical sections.
@@ -511,9 +574,21 @@ impl Cpu {
                 4
             }
             0xF6 => {
-                // OR n
+                // OR A, n
                 let n = self.fetch_byte(bus);
                 self.alu_or(n);
+                8
+            }
+            0xF8 => {
+                // LD HL, SP+e -- HL = SP + signed offset
+                let e = self.fetch_byte(bus) as i8;
+                let result = self.add_sp_offset(e);
+                self.set_hl(result);
+                12
+            }
+            0xF9 => {
+                // LD SP, HL -- copy HL into the stack pointer
+                self.sp = self.get_hl();
                 8
             }
             0xFA => {
@@ -532,7 +607,7 @@ impl Cpu {
                 4
             }
             0xFE => {
-                // CP n
+                // CP A, n
                 let n = self.fetch_byte(bus);
                 self.alu_cp(n);
                 8
@@ -591,7 +666,7 @@ impl Cpu {
         }
     }
 
-    // --- CB rotate/shift ops: take a byte, return result, set flags ---
+    // CB rotate/shift ops: take a byte, return result, set flags
     // All set Z from result, clear N and H, route the shifted-out bit to C.
 
     fn rlc(&mut self, value: u8) -> u8 {
@@ -916,6 +991,18 @@ impl Cpu {
         self.set_half_carry_flag((a & 0x0F) + (value & 0x0F) + carry > 0x0F);
         self.set_carry_flag((a as u16) + (value as u16) + carry as u16 > 0xFF);
         self.a = result;
+    }
+
+    fn add_sp_offset(&mut self, e: i8) -> u16 {
+        // Shared core of ADD SP,e (0xE8) and LD HL,SP+e (0xF8).
+        // Result is a signed 16-bit add, but H and C come from the
+        // UNSIGNED low-byte addition. Z and N are always cleared.
+        let sp = self.sp;
+        self.set_zero_flag(false);
+        self.set_subtract_flag(false);
+        self.set_half_carry_flag((sp & 0x0F) + (e as u16 & 0x0F) > 0x0F);
+        self.set_carry_flag((sp & 0xFF) + (e as u16 & 0xFF) > 0xFF);
+        sp.wrapping_add(e as u16)
     }
 
     // Flag accessors (F register, high nibble only)
@@ -1413,6 +1500,83 @@ mod tests {
         assert_eq!(cpu.l, 0x00, "l wraps to zero");
     }
 
+    // 0x27 DAA -- decimal adjust A after BCD ops. Behavior depends on N/H/C from
+    // the PRIOR op. N preserved, H always cleared, Z from result, C per the 0x60 rule.
+
+    #[test]
+    fn daa_after_addition_adjusts_low_nibble() {
+        // Simulate "9 + 1" in BCD: 0x09 + 0x01 = 0x0A (binary), which is invalid BCD.
+        // DAA after an ADD (N clear) with low nibble 0x0A > 0x09 adds 0x06 -> 0x10 ("10").
+        let (mut cpu, mut bus) = setup(&[0x27]); // DAA
+        cpu.a = 0x0A;
+        cpu.set_subtract_flag(false); // last op was an addition
+        cpu.set_half_carry_flag(false);
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "DAA should take 4 cycles");
+        assert_eq!(cpu.a, 0x10, "0x0A adjusts to 0x10 -- valid BCD for '10'");
+        assert!(!cpu.get_zero_flag(), "0x10 nonzero: Z clear");
+        assert!(
+            !cpu.get_subtract_flag(),
+            "N preserved -- was clear, stays clear"
+        );
+        assert!(!cpu.get_half_carry_flag(), "DAA always clears H");
+        assert!(!cpu.get_carry_flag(), "no decimal carry-out: C clear");
+    }
+
+    #[test]
+    fn daa_after_addition_sets_carry_on_overflow() {
+        // BCD "90 + 90" territory: A=0x90 with carry already... simpler: A=0x9A,
+        // N clear. Low nibble 0xA>9 -> +0x06; high value 0x9A>0x99 -> +0x60, C set.
+        // 0x9A + 0x66 = 0x100 -> wraps to 0x00, C set, Z set.
+        let (mut cpu, mut bus) = setup(&[0x27]); // DAA
+        cpu.a = 0x9A;
+        cpu.set_subtract_flag(false);
+        cpu.set_half_carry_flag(false);
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "DAA should take 4 cycles");
+        assert_eq!(cpu.a, 0x00, "0x9A + 0x66 = 0x100, wraps to 0x00");
+        assert!(cpu.get_zero_flag(), "wrapped result is zero: Z set");
+        assert!(!cpu.get_subtract_flag(), "N preserved -- stays clear");
+        assert!(!cpu.get_half_carry_flag(), "DAA always clears H");
+        assert!(
+            cpu.get_carry_flag(),
+            "value exceeded 0x99: decimal carry-out, C set"
+        );
+    }
+
+    #[test]
+    fn daa_after_subtraction_uses_flag_driven_adjust() {
+        // After a SUBTRACTION (N set), DAA only adjusts based on H/C flags --
+        // NOT the >9/>0x99 value checks. Here H set after a sub -> subtract 0x06.
+        // A=0x0F (e.g. result of a BCD sub that borrowed), N set, H set -> 0x0F-0x06=0x09.
+        let (mut cpu, mut bus) = setup(&[0x27]); // DAA
+        cpu.a = 0x0F;
+        cpu.set_subtract_flag(true); // last op was a subtraction
+        cpu.set_half_carry_flag(true); // a half-borrow occurred
+        cpu.set_carry_flag(false);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "DAA should take 4 cycles");
+        assert_eq!(
+            cpu.a, 0x09,
+            "N set + H set: subtract 0x06 -> 0x0F - 0x06 = 0x09"
+        );
+        assert!(!cpu.get_zero_flag(), "0x09 nonzero: Z clear");
+        assert!(cpu.get_subtract_flag(), "N preserved -- was SET, stays set");
+        assert!(!cpu.get_half_carry_flag(), "DAA always clears H");
+        assert!(
+            !cpu.get_carry_flag(),
+            "C was clear, no 0x60 adjustment: stays clear"
+        );
+    }
+
     // 0x36 LD (HL), n -- the memory-destination member of the collapsed LD r,n row
 
     #[test]
@@ -1430,7 +1594,7 @@ mod tests {
         );
     }
 
-    // 0x37 SWAP A
+    // CB 0x37 SWAP A -- the CB-prefixed 0x37 (vs bare 0x37 = SCF below)
 
     #[test]
     fn swap_a_exchanges_nibbles_and_clears_flags() {
@@ -1446,6 +1610,25 @@ mod tests {
         assert!(!cpu.get_subtract_flag(), "SWAP clears N");
         assert!(!cpu.get_half_carry_flag(), "SWAP clears H");
         assert!(!cpu.get_carry_flag(), "SWAP clears C -- was pre-set true");
+    }
+
+    // 0x37 SCF -- the bare 0x37 (vs CB 0x37 = SWAP A above)
+
+    #[test]
+    fn scf_sets_carry_clears_nh_preserves_z() {
+        let (mut cpu, mut bus) = setup(&[0x37]); // SCF
+        cpu.set_zero_flag(true); // pre-set Z to prove preservation
+        cpu.set_carry_flag(false);
+        cpu.set_subtract_flag(true); // pre-set N to prove it clears
+        cpu.set_half_carry_flag(true); // pre-set H to prove it clears
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 4, "SCF should take 4 cycles");
+        assert!(cpu.get_carry_flag(), "SCF sets C");
+        assert!(!cpu.get_subtract_flag(), "SCF clears N");
+        assert!(!cpu.get_half_carry_flag(), "SCF clears H");
+        assert!(cpu.get_zero_flag(), "Z preserved -- was true, stays true");
     }
 
     // 0x38 JR C, e
@@ -1858,6 +2041,62 @@ mod tests {
         assert!(!cpu.get_subtract_flag());
         assert!(cpu.get_half_carry_flag());
         assert!(!cpu.get_carry_flag());
+    }
+
+    // 0xF8 LD HL, SP+e -- HL = SP + signed offset. Z and N always
+    // cleared, and H/C come from the UNSIGNED low-byte addition, not the 16-bit result.
+
+    #[test]
+    fn ld_hl_sp_plus_e_positive_offset_and_flags() {
+        // SP=0xFF08, e=+0x08 -> HL=0xFF10. Low-byte add 0x08+0x08=0x10:
+        // nibble 0x8+0x8=0x10 > 0xF -> H set; byte 0x08+0x08=0x10, no bit-7 carry -> C clear.
+        let (mut cpu, mut bus) = setup(&[0xF8, 0x08]); // LD HL, SP+8
+        cpu.sp = 0xFF08;
+        cpu.set_zero_flag(true); // pre-set Z to prove it gets cleared
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "LD HL, SP+e should take 12 cycles");
+        assert_eq!(cpu.get_hl(), 0xFF10, "0xFF08 + 8 = 0xFF10");
+        assert!(!cpu.get_zero_flag(), "LD HL, SP+e ALWAYS clears Z");
+        assert!(!cpu.get_subtract_flag(), "always clears N");
+        assert!(
+            cpu.get_half_carry_flag(),
+            "low nibble 0x8+0x8=0x10 overflows bit 3: H set"
+        );
+        assert!(
+            !cpu.get_carry_flag(),
+            "low byte 0x08+0x08=0x10, no bit-7 carry: C clear"
+        );
+    }
+
+    #[test]
+    fn ld_hl_sp_plus_e_carry_from_low_byte() {
+        // SP=0xFF80, e=+0x80 -> HL=0x0000 (0xFF80+0x80 wraps the full 16-bit).
+        // Low byte 0x80+0x80=0x100: bit-7 carry -> C set. Nibble 0x0+0x0=0, H clear.
+        let (mut cpu, mut bus) = setup(&[0xF8, 0x80]); // e=0x80 as i8 = -128
+        cpu.sp = 0xFF80;
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cycles, 12, "LD HL, SP+e should take 12 cycles");
+        // NOTE: e=0x80 as i8 is -128, so the RESULT is 0xFF80 + (-128) = 0xFF00.
+        // But the FLAGS use the unsigned low-byte add 0x80+0x80=0x100 -> C set.
+        assert_eq!(
+            cpu.get_hl(),
+            0xFF00,
+            "signed result: 0xFF80 + (-128) = 0xFF00"
+        );
+        assert!(!cpu.get_zero_flag(), "always clears Z");
+        assert!(!cpu.get_subtract_flag(), "always clears N");
+        assert!(
+            !cpu.get_half_carry_flag(),
+            "low nibble 0x0+0x0=0: no bit-3 carry, H clear"
+        );
+        assert!(
+            cpu.get_carry_flag(),
+            "low byte 0x80+0x80=0x100: bit-7 carry, C set -- flags use UNSIGNED add"
+        );
     }
 
     // 0xFE CP n
