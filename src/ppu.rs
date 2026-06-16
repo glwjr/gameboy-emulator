@@ -18,6 +18,11 @@ pub struct Ppu {
     scanline_cycles: u32,
 }
 
+pub struct InterruptRequest {
+    pub vblank: bool,
+    pub stat: bool,
+}
+
 impl Ppu {
     pub fn new() -> Self {
         Ppu {
@@ -86,5 +91,47 @@ impl Ppu {
             0xFF4B => self.wx = value,
             _ => {}
         }
+    }
+
+    pub fn tick(&mut self, cycles: u8) -> InterruptRequest {
+        let mut interrupts = InterruptRequest {
+            vblank: false,
+            stat: false,
+        };
+
+        // Mode in STAT's low 2 bits (computed from current LY + cycle position)
+        let mode: u8 = if self.ly >= 144 {
+            1 // VBlank
+        } else {
+            match self.scanline_cycles {
+                0..=79 => 2,
+                80..=251 => 3,
+                _ => 0,
+            }
+        };
+        self.stat = (self.stat & !0x03) | mode;
+
+        self.scanline_cycles += cycles as u32;
+
+        if self.scanline_cycles >= 456 {
+            self.scanline_cycles -= 456;
+            self.ly = if self.ly >= 153 { 0 } else { self.ly + 1 };
+
+            if self.ly == 144 {
+                interrupts.vblank = true;
+            }
+
+            // LY == LYC coincidence
+            if self.ly == self.lyc {
+                self.stat |= 0x04;
+                if self.stat & 0x40 != 0 {
+                    interrupts.stat = true;
+                }
+            } else {
+                self.stat &= !0x04;
+            }
+        }
+
+        interrupts
     }
 }
