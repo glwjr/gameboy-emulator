@@ -358,6 +358,13 @@ impl Cpu {
                 self.alu_sub(n);
                 8
             }
+            0xD9 => {
+                // RETI -- return from interrupt: pop pc AND re-enable interrupts.
+                // The IME restore is what makes the next interrupt able to fire.
+                self.pc = self.pop_word(bus);
+                self.ime = true;
+                16
+            }
             0xE0 => {
                 // LDH (n), A - store from A to the high page
                 let n = self.fetch_byte(bus);
@@ -395,6 +402,12 @@ impl Cpu {
                 let addr = 0xFF00 | (n as u16);
                 self.a = bus.read_byte(addr);
                 12
+            }
+            0xF3 => {
+                // DI -- disable interrupts. Clears IME immediately.
+                // Game uses this to guard critical sections.
+                self.ime = false;
+                4
             }
             0xFA => {
                 // LD A, (nn)
