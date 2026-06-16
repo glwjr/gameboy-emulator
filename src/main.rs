@@ -2,6 +2,7 @@ use std::fs;
 
 mod bus;
 mod cpu;
+mod ppu;
 
 use bus::Bus;
 use cpu::Cpu;

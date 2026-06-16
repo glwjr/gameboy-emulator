@@ -1,19 +1,19 @@
+use crate::ppu::Ppu;
 use std::io::Write;
 
 pub struct Bus {
     rom: Vec<u8>,
     rom_bank: u8,
     ram_enabled: bool,
-    vram: [u8; 0x2000],
     cart_ram: [u8; 0x2000],
     wram: [u8; 0x2000],
-    oam: [u8; 0xA0],
     io: [u8; 0x80],
     hram: [u8; 0x7F],
     ie: u8,
     scanline_cycles: u32,
     div_cycles: u16,
     tima_cycles: u32,
+    ppu: Ppu,
 }
 
 impl Bus {
@@ -22,16 +22,15 @@ impl Bus {
             rom,
             rom_bank: 1,
             ram_enabled: false,
-            vram: [0; 0x2000],
             cart_ram: [0; 0x2000],
             wram: [0; 0x2000],
-            oam: [0; 0xA0],
             io: [0; 0x80],
             hram: [0; 0x7F],
             ie: 0,
             scanline_cycles: 0,
             div_cycles: 0,
             tima_cycles: 0,
+            ppu: Ppu::new(),
         }
     }
 
@@ -43,12 +42,13 @@ impl Bus {
                 let offset = addr as usize - 0x4000;
                 self.rom[bank_base + offset]
             }
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
+            0x8000..=0x9FFF => self.ppu.read_vram(addr),
             0xA000..=0xBFFF => self.cart_ram[(addr - 0xA000) as usize],
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize],
-            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
+            0xFE00..=0xFE9F => self.ppu.read_oam(addr),
             0xFEA0..=0xFEFF => 0xFF,
+            0xFF40..=0xFF4B => self.ppu.read_register(addr),
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.ie,
@@ -69,11 +69,11 @@ impl Bus {
             0x4000..=0x7FFF => {
                 // Upper bits / mode -- unused for 512KB (32 banks fit in 5 bits).
             }
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize] = value,
+            0x8000..=0x9FFF => self.ppu.write_vram(addr, value),
             0xA000..=0xBFFF => self.cart_ram[(addr - 0xA000) as usize] = value,
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = value,
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize] = value,
-            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
+            0xFE00..=0xFE9F => self.ppu.write_oam(addr, value),
             0xFEA0..=0xFEFF => {}
             0xFF02 => {
                 // SC, serial control -- writing 0x81 (bit 7 set) starts a transfer
@@ -90,6 +90,7 @@ impl Bus {
                 self.io[0x04] = 0;
                 self.div_cycles = 0;
             }
+            0xFF40..=0xFF4B => self.ppu.write_register(addr, value),
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
             0xFFFF => self.ie = value,
