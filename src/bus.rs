@@ -108,6 +108,16 @@ impl Bus {
     }
 
     pub fn tick(&mut self, cycles: u8) {
+        let mode: u8 = if self.io[0x44] >= 144 {
+            1 // VBlank
+        } else {
+            match self.scanline_cycles {
+                0..=79 => 2,   // OAM scan
+                80..=251 => 3, // pixel transfer
+                _ => 0,        // HBlank
+            }
+        };
+        self.io[0x41] = (self.io[0x41] & !0x03) | mode;
         self.scanline_cycles += cycles as u32;
         self.div_cycles += cycles as u16;
 
@@ -118,7 +128,19 @@ impl Bus {
             let new_ly = if ly >= 153 { 0 } else { ly + 1 };
             self.io[0x44] = new_ly;
             if new_ly == 144 {
-                self.io[0x0F] |= 0x01; // request VBlank interrupt (IF bit 0)
+                self.io[0x0F] |= 0x01; // VBlank
+            }
+
+            // LY == LYC coincidence
+            if new_ly == self.io[0x45] {
+                // LYC
+                self.io[0x41] |= 0x04; // set STAT bit 2 (coincidence flag)
+                if self.io[0x41] & 0x40 != 0 {
+                    // STAT bit 6: coincidence interrupt enabled
+                    self.io[0x0F] |= 0x02; // request STAT interrupt (IF bit 1)
+                }
+            } else {
+                self.io[0x41] &= !0x04; // clear coincidence flag
             }
         }
 
