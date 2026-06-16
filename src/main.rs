@@ -26,6 +26,10 @@ impl GameBoy {
         self.bus.tick(interrupt_cycles + cycles);
     }
 
+    fn framebuffer(&self) -> &[u32] {
+        self.bus.framebuffer()
+    }
+
     fn pc(&self) -> u16 {
         self.cpu.pc()
     }

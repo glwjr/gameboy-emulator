@@ -150,4 +150,8 @@ impl Bus {
             }
         }
     }
+
+    pub fn framebuffer(&self) -> &[u32] {
+        self.ppu.framebuffer()
+    }
 }

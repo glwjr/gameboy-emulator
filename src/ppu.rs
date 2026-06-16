@@ -16,6 +16,7 @@ pub struct Ppu {
     wx: u8,   // 0xFF4B
 
     scanline_cycles: u32,
+    framebuffer: Vec<u32>,
 }
 
 pub struct InterruptRequest {
@@ -40,6 +41,7 @@ impl Ppu {
             wy: 0,
             wx: 0,
             scanline_cycles: 0,
+            framebuffer: vec![0; 160 * 144],
         }
     }
 
@@ -133,5 +135,9 @@ impl Ppu {
         }
 
         interrupts
+    }
+
+    pub fn framebuffer(&self) -> &[u32] {
+        &self.framebuffer
     }
 }
