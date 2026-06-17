@@ -93,6 +93,14 @@ impl Bus {
                 self.io[0x04] = 0;
                 self.div_cycles = 0;
             }
+            0xFF46 => {
+                // OAM DMA: copy 160 bytes from (value * 0x100) into OAM.
+                let source = (value as u16) << 8;
+                for i in 0..0xA0 {
+                    let byte = self.read_byte(source + i);
+                    self.write_byte(0xFE00 + i, byte);
+                }
+            }
             0xFF40..=0xFF4B => self.ppu.write_register(addr, value),
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,

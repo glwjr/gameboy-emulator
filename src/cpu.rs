@@ -786,10 +786,6 @@ impl Cpu {
         )
     }
 
-    pub fn pc(&self) -> u16 {
-        self.pc
-    }
-
     // Fetch and stack helpers
 
     fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {

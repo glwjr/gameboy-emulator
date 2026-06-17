@@ -51,14 +51,6 @@ impl GameBoy {
         self.bus
             .set_buttons(right, left, up, down, a, b, select_btn, start);
     }
-
-    fn pc(&self) -> u16 {
-        self.cpu.pc()
-    }
-
-    fn print_trace(&self) {
-        self.cpu.print_trace(&self.bus);
-    }
 }
 
 fn main() -> Result<(), std::io::Error> {

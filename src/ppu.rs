@@ -162,6 +162,78 @@ impl Ppu {
 
             self.framebuffer[ly as usize * 160 + x as usize] = color;
         }
+
+        self.render_sprites(ly);
+    }
+
+    fn apply_sprite_palette(&self, color_id: u8, palette: u8) -> u32 {
+        let shade = (palette >> (color_id * 2)) & 0x03;
+        match shade {
+            0 => 0xFFFFFF,
+            1 => 0xAAAAAA,
+            2 => 0x555555,
+            3 => 0x000000,
+            _ => unreachable!(),
+        }
+    }
+
+    fn render_sprites(&mut self, ly: u8) {
+        // Sprites disabled? (LCDC bit 1)
+        if self.lcdc & 0x02 == 0 {
+            return;
+        }
+
+        let height: u8 = if self.lcdc & 0x04 != 0 { 16 } else { 8 }; // LCDC bit 2: 8x16 mode
+
+        for i in 0..40 {
+            let base = i * 4;
+            let sprite_y = self.oam[base] as i16 - 16;
+            let sprite_x = self.oam[base + 1] as i16 - 8;
+            let tile_num = self.oam[base + 2];
+            let attrs = self.oam[base + 3];
+
+            // Does this sprite cover the current scanline?
+            let row = ly as i16 - sprite_y;
+            if row < 0 || row >= height as i16 {
+                continue; // not on this line
+            }
+
+            let flip_y = attrs & 0x40 != 0;
+            let flip_x = attrs & 0x20 != 0;
+            let palette = if attrs & 0x10 != 0 {
+                self.obp1
+            } else {
+                self.obp0
+            };
+
+            // Which row within the tile (accounting for Y-flip)
+            let tile_row = if flip_y {
+                (height - 1) - row as u8
+            } else {
+                row as u8
+            };
+
+            // In 8x16 mode the tile number's low bit is ignored; tile_row > 7
+            // selects the second tile. For 8x8, tile_addr is just tile_num*16.
+            let tile_addr = (tile_num as usize) * 16;
+
+            for col in 0..8u8 {
+                let screen_x = sprite_x + col as i16;
+                if screen_x < 0 || screen_x >= 160 {
+                    continue; // off-screen horizontally
+                }
+
+                let tile_col = if flip_x { 7 - col } else { col };
+                let color_id = self.tile_pixel(tile_addr, tile_row, tile_col);
+
+                if color_id == 0 {
+                    continue; // transparent -- background shows through
+                }
+
+                let color = self.apply_sprite_palette(color_id, palette);
+                self.framebuffer[ly as usize * 160 + screen_x as usize] = color;
+            }
+        }
     }
 
     pub fn tick(&mut self, cycles: u8) -> InterruptRequest {
