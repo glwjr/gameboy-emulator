@@ -16,8 +16,8 @@ an accurate interrupt and timer system.
 | Memory + MBC1 mapper | Complete (512KB / 32-bank cartridges)              |
 | Interrupts           | Complete - VBlank, STAT, timer, with EI delay      |
 | Timer (DIV/TIMA)     | Complete                                           |
-| PPU — background     | Complete (scroll, palettes, tile-data addressing)  |
-| PPU — sprites        | Functional (8×8); see Refinements for known gaps   |
+| PPU - background     | Complete (scroll, palettes, tile-data addressing)  |
+| PPU - sprites        | Functional (8×8); see Refinements for known gaps   |
 | OAM DMA              | Functional (instant copy)                          |
 | Joypad input         | Complete (polled)                                  |
 | Sound (APU)          | Not implemented                                    |
@@ -37,7 +37,7 @@ Then:
 cargo run --release
 ```
 
-`--release` is strongly recommended — debug builds run the emulation loop far
+`--release` is strongly recommended - debug builds run the emulation loop far
 slower.
 
 ### Controls
@@ -57,9 +57,9 @@ The emulator is organized around the real hardware's component boundaries.
 
 ```
 main.rs    GameBoy struct (CPU + Bus), the frame loop, minifb window, input
-cpu.rs     SM83 CPU core — registers, opcode execution, interrupt dispatch
+cpu.rs     SM83 CPU core - registers, opcode execution, interrupt dispatch
 bus.rs     Memory map and routing, MBC1 mapper, DIV/TIMA timer, OAM DMA
-ppu.rs     Picture Processing Unit — VRAM, OAM, registers, scanline rendering
+ppu.rs     Picture Processing Unit - VRAM, OAM, registers, scanline rendering
 joypad.rs  Button state and the multiplexed 0xFF00 register
 ```
 
@@ -72,7 +72,7 @@ joypad.rs  Button state and the multiplexed 0xFF00 register
 - **The PPU owns its own state.** VRAM, OAM, the LCD registers, the scanline
   counter, and the framebuffer all live in `Ppu`. The Bus routes the relevant
   address ranges (0x8000–0x9FFF, 0xFE00–0xFE9F, 0xFF40–0xFF4B) to it. The PPU
-  never reaches back into the Bus — instead, `Ppu::tick` returns an
+  never reaches back into the Bus - instead, `Ppu::tick` returns an
   `InterruptRequest` describing which interrupts it wants raised, and the Bus
   applies them. This keeps ownership clean and avoids cyclic borrows.
 
@@ -88,7 +88,7 @@ joypad.rs  Button state and the multiplexed 0xFF00 register
 
 ## Testing
 
-The CPU has a unit-test suite (75 tests) covering opcodes with real logic —
+The CPU has a unit-test suite (75 tests) covering opcodes with real logic -
 flag behavior, stack operations, branching, and the subtle cases (DAA, the
 SP-relative arithmetic flag quirk, the carry-fold in ADC/SBC, the rotate
 zero-flag behaviors).
@@ -103,28 +103,28 @@ prints to stdout. A correct CPU prints `Passed all tests`.
 
 ## Refinements (planned)
 
-These are known simplifications — the emulator works without them, but they're
+These are known simplifications - the emulator works without them, but they're
 on the roadmap toward full accuracy:
 
-- **8×16 sprite mode** — sprites are currently rendered as 8×8. Games that use
+- **8×16 sprite mode:** sprites are currently rendered as 8×8. Games that use
   tall sprites (including parts of Link's Awakening) will show only the top
   half of affected objects until this is added.
-- **Sprite priority** — the "behind background" priority bit is not yet
+- **Sprite priority:** the "behind background" priority bit is not yet
   honored; sprites always draw on top.
-- **10-sprites-per-line limit** — the hardware drops sprites beyond 10 per
+- **10-sprites-per-line limit:** the hardware drops sprites beyond 10 per
   scanline; this limit is not enforced.
-- **The window layer** — the third rendering layer (used for status bars and
+- **The window layer:** the third rendering layer (used for status bars and
   dialogue boxes) is not yet implemented.
-- **OAM DMA timing** — the DMA copy is instantaneous rather than taking its
+- **OAM DMA timing:** the DMA copy is instantaneous rather than taking its
   real ~160 cycles. Games that depend on DMA timing are unaffected in practice.
-- **EI delay precision / STAT timing** — interrupt timing is accurate enough to
+- **EI delay precision / STAT timing:** interrupt timing is accurate enough to
   pass `cpu_instrs`, but some cycle-exact edge cases the Mooneye test suite
   probes are not yet handled.
-- **Sound (APU)** — not implemented.
+- **Sound (APU):** not implemented.
 
 ## License
 
-This emulator — the code in this repository — is released under the MIT
+This emulator is released under the MIT
 License. See [LICENSE](LICENSE) for the full text.
 
 The MIT License covers **the emulator code only**. It does not cover, and
