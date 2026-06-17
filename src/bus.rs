@@ -1,3 +1,4 @@
+use crate::joypad::Joypad;
 use crate::ppu::Ppu;
 use std::io::Write;
 
@@ -13,6 +14,7 @@ pub struct Bus {
     div_cycles: u16,
     tima_cycles: u32,
     ppu: Ppu,
+    joypad: Joypad,
 }
 
 impl Bus {
@@ -29,6 +31,7 @@ impl Bus {
             div_cycles: 0,
             tima_cycles: 0,
             ppu: Ppu::new(),
+            joypad: Joypad::new(),
         }
     }
 
@@ -46,6 +49,7 @@ impl Bus {
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize],
             0xFE00..=0xFE9F => self.ppu.read_oam(addr),
             0xFEA0..=0xFEFF => 0xFF,
+            0xFF00 => self.joypad.read(),
             0xFF40..=0xFF4B => self.ppu.read_register(addr),
             0xFF00..=0xFF7F => self.io[(addr - 0xFF00) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
@@ -73,6 +77,7 @@ impl Bus {
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize] = value,
             0xFE00..=0xFE9F => self.ppu.write_oam(addr, value),
             0xFEA0..=0xFEFF => {}
+            0xFF00 => self.joypad.write(value),
             0xFF02 => {
                 // SC, serial control -- writing 0x81 (bit 7 set) starts a transfer
                 // Intercept it: emit the SB byte to stdout.
@@ -153,5 +158,20 @@ impl Bus {
 
     pub fn framebuffer(&self) -> &[u32] {
         self.ppu.framebuffer()
+    }
+
+    pub fn set_buttons(
+        &mut self,
+        right: bool,
+        left: bool,
+        up: bool,
+        down: bool,
+        a: bool,
+        b: bool,
+        select_btn: bool,
+        start: bool,
+    ) {
+        self.joypad
+            .set_buttons(right, left, up, down, a, b, select_btn, start);
     }
 }
