@@ -1,6 +1,6 @@
 # Game Boy Emulator
 
-A Game Boy (DMG) emulator written in Rust. It boots and plays
+A Game Boy (DMG) emulator written from scratch in Rust. It boots and plays
 commercial cartridges. The primary test target has been _The Legend of Zelda:
 Link's Awakening_.
 
